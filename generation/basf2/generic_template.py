@@ -17,6 +17,7 @@ import reconstruction as re
 import mdst as mdst
 import glob as glob
 import sys
+from itertools import product
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -68,10 +69,28 @@ SIG_MODES = [
 # generic modes
 GEN_MODES = [
     "mixed",
-    "charged"
+    "charged",
 ]
 
-DEC_MODES = SIG_MODES + GEN_MODES
+# continuum, default
+CON_MODES = [
+    "uubar",
+    "ddbar",
+    "ssbar",
+    "ccbar",
+    ]
+# some custom options I want to try for continuum
+# by default, charged conjuagates included
+CON_SUFFIX = {
+    "wKstr": ["K*+", "K*0", "11", "13"], #K*s, electrons, and muons 
+    "wKs": ["K+", "K0", "11", "13"], #K*s, electrons, and muons 
+    "wDstr": ["D*+", "D*0", "D_s*+", "D_s+", "11", "12", "13", "14"], # try to capture any semileptonic decay candidates
+    "wDs": ["D+", "D0","D_s+", "11", "12", "13", "14"], # try to capture any semileptonic decay candidates,
+}
+#including any possible combination
+CON_CUSTOM = [f"{mode}_{suffix}" for (mode,suffix) in product(CON_MODES, list(CON_SUFFIX.keys()))]
+
+DEC_MODES = SIG_MODES + GEN_MODES + CON_MODES + CON_CUSTOM
 
 
 DEFAULT_N_EVENTS = 5000
@@ -152,6 +171,16 @@ def build_path(mode, n_events, dec_file, out_file, bkg_files):
     elif mode in GEN_MODES:
         # Generic B Bbar: 'mixed' (neutral) or 'charged'
         ge.add_evtgen_generator(main, finalstate=mode)
+    elif mode in CON_MODES:
+        ge.add_continuum_generator(main, finalstate = mode)
+    elif mode in CON_CUSTOM:
+        # expected structure is mode_suffix
+        finalstate, suffix = mode.split("_", 1)
+        # sanity check
+        if (finalstate not in CON_MODES) or (suffix not in CON_SUFFIX):
+            sys.exit(f"for inclusive continuum generator, check {mode}. Something is wrong.")
+        ge.add_inclusive_continuum_generator(main, finalstate = finalstate, particles = CON_SUFFIX[suffix])
+
     else:
         # 
         b2.B2WARNING("unknown mode... fall back is no constraint")
