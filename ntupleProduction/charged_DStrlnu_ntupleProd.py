@@ -95,26 +95,28 @@ photon_cuts = " and ".join([
     #"[E > 0.1]", #TODO: do we want this? 
     "[thetaInCDCAcceptance==1]"
 ])
-# so I am reconstructing B0 -> D* e nu 
+# so I am reconstructing B+ -> anti-D*0 l+ nu
 # maybe easier to keep e and µ channels separate
-# where D* -> D0bar (-> K pi) pi
+# where anti-D*0 -> anti-D0 (-> K+ pi- [pi0]) pi0
 # start with final state particles and build up from there
 
 # loose PID cuts
 vm.addAlias("kaonBinaryPID", "binaryPID(321, 211)")
 vm.addAlias("pionBinaryPID", "binaryPID(211, 321)")
 PID_Cuts = {
+    "e+":  "electronID > 0.1",
+    "mu+":  "muonID > 0.1",
     "pi+":  "pionBinaryPID > 0.1",
     "K+":  "kaonBinaryPID > 0.1"
 }
 
 # signal side final state particles
-ma.fillParticleList("e+:sig", f"{track_cuts}", path=path)
-ma.fillParticleList("mu+:sig", f"{track_cuts}", path=path)
+ma.fillParticleList("e+:sig", f"{track_cuts} and {PID_Cuts['e+']}", path=path)
+ma.fillParticleList("mu+:sig", f"{track_cuts} and {PID_Cuts['mu+']}", path=path)
 ma.fillParticleList("K+:D", f"{track_cuts} and {PID_Cuts['K+']}", path=path)
 ma.fillParticleList("pi+:D", f"{track_cuts} and {PID_Cuts['pi+']}", path=path) 
 ma.fillParticleList("pi+:Dstr", f"{slow_pion_cut} and {PID_Cuts['pi+']}", path=path) # slow pion
-ma.fillParticleList("pi+:KS", f"{track_displaced_selection}", path=path) # for creating k shorts
+#ma.fillParticleList("pi+:KS", f"{track_displaced_selection}", path=path) # for creating k shorts
 ma.fillParticleList("gamma:pi0",
                     "[[clusterReg == 1 and E > 0.08] or [clusterReg == 2 and E > 0.03] "
                     "or [clusterReg == 3 and E > 0.06]] and abs(clusterTiming) < 200",
@@ -122,11 +124,11 @@ ma.fillParticleList("gamma:pi0",
 #ma.reconstructDecay("pi0:std -> gamma:pi0 gamma:pi0", "0.10 < InvM < 0.16", path=path)
 ma.reconstructDecay("pi0:D -> gamma:pi0 gamma:pi0", "0.12 < InvM < 0.15", path=path)
 ma.reconstructDecay("pi0:Dstr -> gamma:pi0 gamma:pi0", "0.11 < InvM < 0.15", path=path)
-ma.copyLists('pi+:std', ['pi+:D', 'pi+:Dstr'], path=path)
-ma.copyLists('pi0:std', ['pi0:D', 'pi0:Dstr'], path=path)
-# paper mentions ZernikeMVA but this is unreliable if we cannot guarantee track/cluster isolation 
+#ma.copyLists('pi+:std', ['pi+:D', 'pi+:Dstr'], path=path)
+#ma.copyLists('pi0:std', ['pi0:D', 'pi0:Dstr'], path=path)
+# paper mentions ZernikeMVA but this is unreliable if we cannot guarantee track/cluster isolation
 
-ma.reconstructDecay("K_S0:std -> pi+:KS pi-:KS", "0.40 < M < 0.60", path=path)
+#ma.reconstructDecay("K_S0:std -> pi+:KS pi-:KS", "0.40 < M < 0.60", path=path)
 #TODO: do slow pion efficiency corrections at some point --> maybe when we use Run Dependent
 #TODO: do photon energy corrections as well 
 #TODO: K shorts will also need a correction
@@ -159,7 +161,7 @@ ma.buildEventKinematics(inputListNames=['pi+:goodtracks', 'gamma:goodclusters'],
 
 # optional: cut on event levels if desired
 
-# reconstruct signal neutral B
+# reconstruct signal charged B
 D_mass = "1.75 < M < 2.0" # wide enough for both D0 and D±
 # for when we want to consider all D0 modes
 D_modes = {  # dmID: decay string (K-like first, pi0 last)
@@ -167,53 +169,51 @@ D_modes = {  # dmID: decay string (K-like first, pi0 last)
                 "K_S0:std pi0:D", "K_S0:std pi+:D pi-:D",  "K_S0:std pi+:D pi-:D pi0:D"],
 }
 
+active_modes = ["K-:D pi+:D", "K-:D pi+:D pi0:D"] # only include channels in dec file
 for D, modes in D_modes.items():
-    for i, daus in enumerate(["K-:D pi+:D",  "K-:D pi+:D pi0:D"]): # only include channels in dec file
+    for i, daus in enumerate(active_modes):
         ma.reconstructDecay(f"{D}:m{i} -> {daus}", D_mass, dmID=i, path=path)
-    ma.copyLists(f"{D}:Dst", [f"{D}:m{i}" for i in range(len(modes))], path=path)
+    ma.copyLists(f"{D}:Dst", [f"{D}:m{i}" for i in range(len(active_modes))], path=path)
 
 Dstr_cut = "massDifference(0) < 0.2"
 ma.reconstructDecay("D*0:sig -> D0:Dst pi0:Dstr", Dstr_cut, dmID=0, path=path)
 
 
 
-b_cut = "Mbc > 5.2 and abs(deltaE) < 0.3"
-if mode == "e":
-    ma.reconstructDecay(
-        "B+:sig -> D*0:sig e+:sig ?nu", b_cut, path=path)  
-if mode == "mu":
-    ma.reconstructDecay(
-        "B+:sig -> D*0:sig mu+:sig ?nu", b_cut, path=path)  
+b_cut = ""
+# B+ (u b-bar) -> anti-D*0 l+ nu; anti-D*0:sig is the auto-created conjugate of D*0:sig
+ma.reconstructDecay(f"B+:sig -> anti-D*0:sig {mode}+:sig ?nu", b_cut, path=path)
 
-# perform vertex for B0 reconstruction
+# perform vertex for B+ reconstruction
 # standard vertex algorithm for Belle II is the treeFit algorithm
 # TODO: We actually need to do this twice. Need to update this later... 
 # TODO: In the fastSim version, I don't think any vertex fitting is done... plz check
 
-ma.variablesToExtraInfo("B0:sig", {"daughter(0, massDifference(0))": "preFit_deltaM",
-                                   "daughter(0, daughter(0, dM))": "preFit_D_dM"}, path=path)
+ma.variablesToExtraInfo("B+:sig", {"daughter(0, massDifference(0))": "preFit_deltaM",
+                                   "daughter(0, daughter(0, dM))": "preFit_D_dM",
+                                   "daughter(0, daughter(1, M))": "preFit_Dstr_soft_M"}, path=path)
 
-vertex.treeFit("B0:sig", conf_level = 0.0, 
+vertex.treeFit("B+:sig", conf_level = 0.0, 
                 updateAllDaughters=True , path=path)
  
 
-ma.rankByHighest("B0:sig", "chiProb", outputVariable="B_rank_chiProb", path=path)
+ma.rankByHighest("B+:sig", "chiProb", outputVariable="B_rank_chiProb", path=path)
 
 
 #ma.applyCuts('B+:feiHadronic', 'Mbc > 5.2 and -0.25 < deltaE < 0.3 and cosTBTO(fei_mask) < 0.99', path=path) #broaden for more studies
 
 
 # so we have truth information
-ma.matchMCTruth(list_name = "B0:sig", path = path)
+ma.matchMCTruth(list_name = "B+:sig", path = path)
 
 
-ma.buildRestOfEvent('B0:sig', inputParticlelists = ['K+:D','e+:sig','mu+:sig', 'pi+:D'] ,path=path)
+ma.buildRestOfEvent('B+:sig', inputParticlelists = ['K+:D','e+:sig','mu+:sig', 'pi+:D'] ,path=path)
 
 ecl_selection = "[[[clusterReg==1] and [E>0.080]] or [[clusterReg==2] and [E > 0.03]] or [[clusterReg==3] and [E > 0.06]]] "
 ecl_selection += "and [clusterNHits > 1.5] and [0.2967 < clusterTheta < 2.6180] and [abs(clusterTiming) < 200]"
 roe_mask = (track_selection, ecl_selection)
 
-ma.appendROEMask('B0:sig', 'roe_mask', *roe_mask, path=path)
+ma.appendROEMask('B+:sig', 'roe_mask', *roe_mask, path=path)
 
 
 # working for rest of event: 
@@ -222,7 +222,7 @@ roe_path = b2.create_path()
 deadEndPath = b2.create_path()
 
 # Execute the filter module:
-ma.signalSideParticleFilter('B0:sig', '', roe_path, deadEndPath)
+ma.signalSideParticleFilter('B+:sig', '', roe_path, deadEndPath)
 
 good_roe_photons = "isInRestOfEvent == 1 and E > 0.1" #  and beamBackgroundSuppression > 0.1 and fakePhotonSuppression > 0.1
 bad_roe_photons = "isInRestOfEvent == 1 and E > 0.05"
@@ -245,7 +245,7 @@ path.for_each('RestOfEvent', 'RestOfEvents', path = roe_path)
 # reconstruct rest of event (tag side)
 # TODO: inputParticlelists should be corrected/calibrated FSPs. Update in future 
 
-#ma.buildContinuumSuppression('B0:sig', 'fei_mask', path=path)
+#ma.buildContinuumSuppression('B+:sig', 'fei_mask', path=path)
 # Required selections on tag candidates
 #ma.applyCuts('B+:feiHadronic', 'Mbc > 5.27 and -0.15 < deltaE < 0.1 and cosTBTO(fei_mask) < 0.9', path=path) #default 
 #ma.applyCuts('B+:feiHadronic', 'Mbc > 5.2 and -0.25 < deltaE < 0.3 and cosTBTO(fei_mask) < 0.99', path=path) #broaden for more studies
@@ -282,26 +282,24 @@ event_vars = ['nTracks','L1Trigger','HighLevelTrigger','nExtraCDCHits','nExtraCD
 
 #TODO: Do we need MC Kinematics? 
 # collecting variables
-ks_vars = [ "chiProb", "distance", "significanceOfDistance",
-           "cosAngleBetweenMomentumAndVertexVector"]
-
 fsp_vars = vc.mc_variables + vc.mc_truth + vc.kinematics + cms_kinematics + \
-            pidvars + vc.track + vc.track_hits 
-d_vars = vc.mc_truth + vc.kinematics + cms_kinematics + vc.inv_mass  + \
-            vc.vertex + vc.mc_vertex + ['foxWolframR2', 'cosAngleBetweenMomentumAndVertexVector']
-b_vars = vc.mc_truth + vc.vertex + vc.kinematics + vc.inv_mass + \
-    vc.deltae_mbc  + \
-    vu.create_aliases_for_selected(
-        fsp_vars, f"B0 -> [D*- -> [anti-D0 -> ^K+ ^pi- ^pi- ^pi+] ^pi-] {mode}+",
-        prefix=["D_d0", "D_d1", "D_d2", "D_d3", "Dstr_soft"],
-    ) + \
-    vu.create_aliases_for_selected(
-        ks_vars, f"B0 -> [D*- -> [anti-D0 -> ^K_S0 pi+ pi-] pi-] {mode}+", prefix="D_d0") + \
-    vu.create_aliases_for_selected(list_of_variables=fsp_vars, 
-                                   decay_string=f'B0 -> D*- ^{mode}+',
-                                   prefix = f"{mode}sig") + \
-    vu.create_aliases_for_selected(d_vars, f"B0 -> ^D*- {mode}+", prefix="Dstr") + \
-    vu.create_aliases_for_selected(d_vars, f"B0 -> [D*- -> ^anti-D0 pi-] {mode}+", prefix="D") 
+            pidvars + vc.track + vc.track_hits
+d_vars = vc.mc_truth + vc.mc_variables + vc.kinematics + cms_kinematics + vc.inv_mass  + \
+            vc.vertex + vc.mc_vertex + ['cosAngleBetweenMomentumAndVertexVector']
+pi0_slot_vars = vc.mc_truth + vc.kinematics + ["M", "InvM"]
+
+LEP = f"{mode}+"
+b_vars = vc.mc_truth + vc.vertex + vc.kinematics + vc.inv_mass + vc.deltae_mbc + \
+         ["cosThetaBetweenParticleAndNominalB"]
+# D* chain: charged tracks (K, pi) get track vars, pi0s (from D0 and the slow one) get pi0 vars
+b_vars += vu.create_aliases_for_selected(
+    fsp_vars, f"B+ -> [anti-D*0 -> [anti-D0 -> ^K+ ^pi-] pi0] {LEP}", prefix=["D_d0", "D_d1"])
+b_vars += vu.create_aliases_for_selected(
+    pi0_slot_vars, f"B+ -> [anti-D*0 -> [anti-D0 -> K+ pi- ^pi0] ^pi0] {LEP}",
+    prefix=["D_d2", "Dstr_soft"])  # D_d2 empty for the K pi mode
+b_vars += vu.create_aliases_for_selected(d_vars, f"B+ -> ^anti-D*0 {LEP}", prefix="Dstr")
+b_vars += vu.create_aliases_for_selected(d_vars, f"B+ -> [anti-D*0 -> ^anti-D0 pi0] {LEP}", prefix="D")
+b_vars += vu.create_aliases_for_selected(fsp_vars, f"B+ -> anti-D*0 ^{LEP}", prefix=f"{mode}sig")
 
 b_vars += vu.create_aliases(["decayModeID"], "daughter(0, extraInfo({variable}))", "Dstr")
 b_vars += vu.create_aliases(["decayModeID"], "daughter(0, daughter(0, extraInfo({variable})))", "D")
@@ -315,12 +313,27 @@ roe_multiplicities = [
 ]
 b_vars += roe_kinematics + roe_multiplicities + \
             event_vars + skim_vars + vc.event_level_tracking  + \
-            ["extraInfo(preFit_deltaM)", "extraInfo(preFit_D_dM)"]
+            ["extraInfo(preFit_deltaM)", "extraInfo(preFit_D_dM)", "extraInfo(preFit_Dstr_soft_M)"]
 
-photon_vars = vc.cluster
-pi0_vars = vc.mc_truth + vc.kinematics + vc.inv_mass + \
-    vu.create_aliases_for_selected(list_of_variables=photon_vars, 
-                                    decay_string=f'pi0 -> ^gamma ^gamma')
+# --- neutrino / missing-momentum estimators (all per candidate) ---
+# opt 0: beam - signal - ROE; opt 3: B at rest, signal side only; opt 4: |p_B| = 0.34 GeV opposite the ROE (forces CMS)
+nu_aliases = {
+    # missing mass^2: full ROE / B at rest (no ROE) / B direction from ROE
+    "missM2_ROE":     "useCMSFrame(weMissM2(roe_mask, 0))",
+    "missM2_Brest":   "useCMSFrame(weMissM2(roe_mask, 3))",
+    "missM2_Bdir":    "weMissM2(roe_mask, 4)",
+    # missing energy / momentum (full ROE)
+    "missE_ROE":      "useCMSFrame(weMissE(roe_mask, 0))",
+    "missP_ROE":      "useCMSFrame(weMissP(roe_mask, 0))",
+    "missPTheta_lab": "weMissPTheta(roe_mask, 0)",   # lab frame on purpose: detector acceptance
+    # q^2 = (p_B - p_D*)^2: full ROE / B at rest / B direction from ROE
+    "q2_ROE":         "useCMSFrame(weQ2lnuSimple(roe_mask, 0))",
+    "q2_Brest":       "useCMSFrame(weQ2lnuSimple(roe_mask, 3))",
+    "q2_Bdir":        "weQ2lnuSimple(roe_mask, 4)",
+}
+for name, expr in nu_aliases.items():
+    vm.addAlias(name, expr)
+b_vars += list(nu_aliases)
 
 
 
@@ -330,7 +343,7 @@ vm.printAliases()
 outputPath = f"{HOME}/data"
 # VariablesToNtuple
 ma.variablesToNtuple(
-    "B:sig",
+    "B+:sig",
     variables=b_vars ,
     filename=f"{outputPath}/{rootOutputName}",
     treename="ntuple",
