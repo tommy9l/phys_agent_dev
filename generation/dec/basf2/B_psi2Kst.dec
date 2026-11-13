@@ -1,0 +1,48 @@
+# Charmonium control / peaking background for B+ -> K*+ l+ l-:
+# B+ -> J/psi(-> l+ l-) K*+, same visible final state as the signal.
+# Mirrors B0_JpsiKst.dec (same SVV_HELAMP amplitudes) with the charged-B
+# Upsilon(4S) line and the two K*+ submodes (50/50 = physical ratio; together
+# they are 2/3 of K*+ decays, apply that factor at analysis time).
+
+Alias      K*+sig       K*+
+Alias      K*-sig       K*-
+ChargeConj K*+sig       K*-sig
+
+# psi(2S)sig is already defined in basf2's DECAY_BELLE2.DEC (like B0sig/B+sig),
+# so it must not be defined again here.
+
+Decay Upsilon(4S)
+0.500  B+sig B-                      VSS;
+0.500  B-sig B+                      VSS;
+Enddecay
+
+# Helicity amplitudes (|H+|, arg(H+), |H0|, arg(H0), |H-|, arg(H-))
+Define PKHplus  0.159
+Define PKHzero  0.775
+Define PKHminus 0.612
+Define PKphHplus  1.563
+Define PKphHzero  0.0
+Define PKphHminus 2.712
+
+
+Decay B+sig
+1.000  psi(2S)sig K*+sig               SVV_HELAMP PKHminus PKphHminus PKHzero PKphHzero PKHplus PKphHplus; #Gamma_312 PDGLive => Exclusive BF.    #[BF update - PG 09/2020]
+Enddecay
+CDecay B-sig
+
+# let's only focus on the lepton decay modes. 
+# generic BBbar decay should have all the more exotic interactions 
+# this should be the most useful in understanding the psi(2s) peak
+
+Decay psi(2S)sig
+0.500  e+  e-                        PHOTOS VLL;
+0.500  mu+ mu-                       PHOTOS VLL;
+Enddecay
+
+Decay K*+sig
+0.500  K+    pi0                     VSS;
+0.500  K_S0  pi+                     VSS;
+Enddecay
+CDecay K*-sig
+
+End
