@@ -100,10 +100,10 @@ slow_pion_cut = " and ".join([
 # [RS] loose PID for now, to be validated. Paper values (arXiv:2206.05946, Sec. 3):
 #      electronID > 0.9 and p > 0.4, muonID > 0.9 and p > 0.8, binaryPID > 0.6
 pid_cuts = {
-    "e":  "electronID > 0 and p > 0",
-    "mu": "muonID > 0 and p > 0",
-    "K":  "binaryPID(321, 211) > 0",
-    "pi": "binaryPID(211, 321) > 0",
+    "e":  "electronID > 0.1 and p > 0",
+    "mu": "muonID > 0.1 and p > 0",
+    "K":  "binaryPID(321, 211) > 0.1",
+    "pi": "binaryPID(211, 321) > 0.1",
 }
 
 # so I am reconstructing B0 -> K*0 l l   [RS] (comment said D* e nu)
