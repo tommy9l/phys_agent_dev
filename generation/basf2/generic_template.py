@@ -26,12 +26,14 @@ Steering file for Belle II MC production (generation -> simulation ->
 reconstruction -> mDST), based on the official MC production setup.
 Still MC16ri-like.
 
-Usage:
-    basf2 generic_template.py <mode> [-n N_EVENTS] [--home PATH] [--no-bkg]
+Usage (options for this script must come after "--", otherwise basf2
+rejects them as its own: "error: unrecognised option"):
+    basf2 generic_template.py -- <mode> [--n-events N] [--home PATH] [--no-bkg] [--suffix SUFFIX]
 
 Examples:
-    basf2 generic_template.py B0_Dsttaunu
-    basf2 generic_template.py generic_mixed -n 10000
+    basf2 generic_template.py -- B0_Dsttaunu
+    basf2 generic_template.py -- mixed --n-events 10000 --suffix _1
+    basf2 generic_template.py -- uubar --suffix _1
 """
 
 import argparse
@@ -83,11 +85,14 @@ CON_MODES = [
     ]
 # some custom options I want to try for continuum
 # by default, charged conjuagates included
+# InclusiveParticleChecker needs particle NAMES: PDG-code strings such as "11"
+# stop basf2 at initialization ("Unknown particle name: 11").
+# Note: an event is kept if ANY ONE of the listed particles is present.
 CON_SUFFIX = {
-    "wKstr": ["K*+", "K*0", "11", "13"], #K*s, electrons, and muons 
-    "wKs": ["K+", "K0", "11", "13"], #K*s, electrons, and muons 
-    "wDstr": ["D*+", "D*0", "D_s*+", "D_s+", "11", "12", "13", "14"], # try to capture any semileptonic decay candidates
-    "wDs": ["D+", "D0","D_s+", "11", "12", "13", "14"], # try to capture any semileptonic decay candidates,
+    "wKstr": ["K*+", "K*0", "e-", "mu-"], #K*s, electrons, and muons
+    "wKs": ["K+", "K0", "e-", "mu-"], #kaons, electrons, and muons
+    "wDstr": ["D*+", "D*0", "D_s*+", "D_s+", "e-", "nu_e", "mu-", "nu_mu"], # try to capture any semileptonic decay candidates
+    "wDs": ["D+", "D0","D_s+", "e-", "nu_e", "mu-", "nu_mu"], # try to capture any semileptonic decay candidates,
 }
 #including any possible combination
 CON_CUSTOM = [f"{mode}_{suffix}" for (mode,suffix) in product(CON_MODES, list(CON_SUFFIX.keys()))]
@@ -212,7 +217,9 @@ def main():
     # Fail early if a signal mode is missing its decay file
     if args.mode not in DEC_MODES:
         sys.exit("{args.mode} not registered. Fix or add.")
-    if not dec_file.is_file():
+    # continuum modes use basf2's built-in KKMC/Pythia setup, no user dec file
+    needs_dec = args.mode not in CON_MODES + CON_CUSTOM
+    if needs_dec and not dec_file.is_file():
         sys.exit(f"Decay file not found: {dec_file}")
 
     # Make sure the output directory exists
