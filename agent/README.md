@@ -9,7 +9,7 @@ between Plan and Execute.
 
 ```bash
 source scripts/env.sh
-pip install anthropic
+pip install anthropic 'pymupdf>=1.24'   # pymupdf: only for read_paper
 export ANTHROPIC_API_KEY=...   # or `ant auth login`
 ```
 
@@ -39,8 +39,9 @@ The approval gate between Plan and Execute has two modes
 | File | Role |
 |---|---|
 | `runner.py` | agent loop (Anthropic tool runner), system prompt with the Plan→Execute→Report contract and the analysis policy |
-| `tools.py` | typed tools: generation (`list_decay_modes`, `generate_mc`, `generate_continuum`, `make_ntuple`), ntuples (`list_branches`, `query_ntuple`, `plot_variable`, `plot_stacked`, `scan_cut`, `fit_templates`), systematics (`apply_systematics`), notes |
+| `tools.py` | typed tools: references (`read_references`, `read_paper`, `read_recipe`, `read_selection`), generation (`list_decay_modes`, `generate_mc`, `generate_continuum`, `make_ntuple`), ntuples (`list_branches`, `query_ntuple`, `plot_variable`, `plot_stacked`, `scan_cut`, `fit_templates`), systematics (`apply_systematics`), notes |
 | `__main__.py` | CLI entry point |
+| `paperlite/` | PDF → Markdown converter (PyMuPDF) behind `read_paper`; see `paperlite/README.md` |
 | `../systematics/*.json` | published systematic-uncertainty tables read by `apply_systematics` (e.g. Belle II arXiv:2206.05946 Table I) |
 | `../tests/test_offline.py` | offline tests, no API calls: `python tests/test_offline.py` |
 
@@ -53,6 +54,12 @@ Design choices worth knowing:
 - Tool file access is confined to `generation/dec/`, `data/`, `plots/`.
   Ntuples may sit in plain subdirectories of `data/`
   (e.g. `data/kekcc/` for the Belle II full-MC samples copied from KEKCC).
+- Reference papers: the student puts PDFs in `data/papers/` (gitignored).
+  `read_paper` converts one on first use into `data/papers/<stem>/`
+  (Markdown, `index.json`, figure/table/equation crops) and returns the
+  outline plus the methodology and results sections, about 10k tokens at
+  most; introduction, discussion, appendices and references are listed
+  and fetched only by name (`section=`) or page range (`pages=`).
 - `query_ntuple` / `plot_variable` evaluate cut strings with numpy in a
   restricted namespace.
 - Both ntuple formats are read: the fast-sim tree `events` and the basf2
@@ -60,7 +67,9 @@ Design choices worth knowing:
   `deltaE`, `B_rank`, `isSignal`; use `list_branches` to see them).
 - Only text crosses the network: the task, the tool definitions and the
   short strings the tools return. Plot tools return a file path, never an
-  image; ntuples never leave the machine.
+  image; ntuples never leave the machine. `read_paper` sends the extracted
+  text of the published papers you put in `data/papers/`, never the PDF or
+  its images.
 - Cost: the agent loop uses **prompt caching**, so the system prompt, tool
   definitions and history resent each turn are billed as cache reads. The
   end-of-run `[usage]` line counts agent turns *and* reviewer calls,

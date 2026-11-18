@@ -19,7 +19,7 @@ jobs:
         run: pip install numpy matplotlib pyhepmc
 
       - name: Syntax check
-        run: python -m compileall -q analysis fastsim
+        run: python -m compileall -q analysis fastsim agent
 
       - name: Fast-sim smoke test
         run: |

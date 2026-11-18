@@ -93,7 +93,12 @@ them (never through server-side code execution).
 1. PLAN: call read_recipe (the task names a recipe: bf_measurement,
    ratio_measurement, search, cutflow_reproduction; if it does not,
    read the index and pick the one that fits the goal) and
-   read_references; when the mode at hand is not covered there (or you
+   read_references; then call read_paper with no name to see which
+   published papers the student has placed in data/papers/, and read
+   the one for the analysis you follow (read_paper returns its
+   methodology and results; ask for other sections by name only when
+   needed) to take variables, windows and background treatment from the
+   paper itself. When the mode at hand is not covered there (or you
    need concrete numbers such as measured branching fractions or
    published selection windows), use web_search to consult the
    literature (arXiv, journals, PDG). Then fill the recipe's seven
@@ -370,9 +375,12 @@ def dry_run(task: str) -> None:
     query_ntuple on a standard file) and prints the results. Use this to
     test tool changes before spending API budget."""
     print(f"[dry-run] task (not sent anywhere): {task!r}")
-    from .tools import list_decay_modes, query_ntuple, read_references
+    from .tools import (list_decay_modes, query_ntuple, read_paper,
+                        read_references)
     print("[dry-run] read_references ->",
           read_references.call({})[:120].replace("\n", " "), "...")
+    print("[dry-run] read_paper ->",
+          read_paper.call({})[:120].replace("\n", " "), "...")
     print("[dry-run] list_decay_modes ->",
           list_decay_modes.call({}).splitlines()[0], "...")
     try:

@@ -209,6 +209,56 @@ def test_caption_placement_checks():
     assert "caption line" in _check_table_captions(bad_md)[0]
 
 
+
+def test_read_paper_triage_and_guards():
+    """read_paper converts a PDF from the papers folder on first use, shows
+    methodology/results, lists but hides intro/discussion/appendix, and
+    rejects paths outside the folder. Uses an analysis note from docs/notes/
+    as the 'paper'; skipped when PyMuPDF is not installed."""
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        print("  (skipped: pymupdf not installed)")
+        return
+    import shutil
+    repo = Path(__file__).resolve().parents[1]
+    src = repo / "docs" / "notes" / "dsttaunu_note_agent.pdf"
+    with tempfile.TemporaryDirectory() as d:
+        old = tools.PAPER_DIR
+        tools.PAPER_DIR = Path(d)
+        try:
+            assert "no papers yet" in _call(tools.read_paper)
+            shutil.copy(src, Path(d) / "note.pdf")
+            assert "note.pdf: (not converted yet)" in _call(tools.read_paper)
+
+            out = _call(tools.read_paper, name="note")
+            assert (Path(d) / "note" / "index.json").exists()
+            assert len(out) <= tools.PAPER_CHAR_BUDGET
+            assert "3 Event selection (p3" in out and "[shown]" in out
+            assert "1 Introduction" in out and "[ask by name]" in out
+            assert "Appendix: Referee comments" in out
+            assert "[back matter]" in out
+            body = out.split("\n---\n", 1)[1]
+            assert "## 5.2 Template fit" in body          # results shown
+            assert "## 1 Introduction" not in body        # intro held back
+            assert "Appendix" not in body                 # appendix held back
+            assert "images/fig_1_p3.png" in out           # crop paths listed
+
+            sec = _call(tools.read_paper, name="note", section="appendix")
+            assert sec.startswith("## Appendix") and "### Verdict" in sec
+            pg = _call(tools.read_paper, name="note.pdf", pages="2-3")
+            assert "<!-- page 2 -->" in pg and "<!-- page 4 -->" not in pg
+
+            for bad in ("../x", "/etc/passwd", "a/b"):
+                assert _call(tools.read_paper, name=bad).startswith("error")
+            assert "available: note.pdf" in _call(tools.read_paper, name="no")
+            assert _call(tools.read_paper, name="note",
+                         pages="x").startswith("error")
+            assert "headings:" in _call(tools.read_paper, name="note",
+                                        section="no such heading")
+        finally:
+            tools.PAPER_DIR = old
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

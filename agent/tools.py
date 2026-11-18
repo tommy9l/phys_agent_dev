@@ -6,7 +6,8 @@ decorator turns the signature + docstring into a tool schema automatically.
 
 All paths are confined to the repository (dec files under generation/dec/,
 ntuples and outputs under data/ and plots/, read-only systematics tables
-under systematics/), so the agent cannot touch anything else.
+under systematics/, reference-paper PDFs and their Markdown conversions
+under data/papers/), so the agent cannot touch anything else.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ DATA_DIR = REPO / "data"
 PLOT_DIR = REPO / "plots"
 NOTES_DIR = REPO / "notes"
 SYST_DIR = REPO / "systematics"
+PAPER_DIR = DATA_DIR / "papers"
 GENERATE_BIN = REPO / "generation" / "bin" / "generate"
 MAX_EVENTS = 2_000_000
 
@@ -739,6 +741,249 @@ def read_note_template() -> str:
     return (REPO / "docs" / "note_template.md").read_text()
 
 
+# --- reference papers (PDF -> Markdown via agent/paperlite) -----------------
+# One folder for everything: drop <stem>.pdf into data/papers/; the first
+# read converts it into data/papers/<stem>/ (<stem>.md, index.json and the
+# figure/table/equation crops). data/ is gitignored, so papers stay local.
+
+PAPER_CHAR_BUDGET = 40_000          # ~10k tokens per read_paper result
+
+# Section triage by heading text. Methodology and results are shown first;
+# back matter is listed but never shown unless asked for by name.
+_PAPER_SKIP_RE = re.compile(
+    r"\b(contents|acknowledg\w*|author contributions?|data availability)\b",
+    re.I)
+_PAPER_BACK_RE = re.compile(
+    r"\b(references|bibliography|appendi(x|ces)|supplement\w*)\b", re.I)
+_PAPER_PRIORITY_RE = re.compile(
+    r"\b(abstract|method\w*|analysis|strategy|selection|reconstruct\w*|"
+    r"event|candidates?|signal|backgrounds?|fit\w*|extraction|yields?|"
+    r"cut ?flow|systematic\w*|uncertaint\w*|efficienc\w*|calibrat\w*|corrections?|"
+    r"samples?|simulation|data ?sets?|data|control|continuum|tag\w*|"
+    r"results?|measurements?|conclusions?|summary)\b", re.I)
+_MD_HEAD_RE = re.compile(r"^(#{1,6}) (.+)$")
+_PAGE_MARK_RE = re.compile(r"^<!-- page (\d+) -->$")
+# paperlite sometimes promotes a long numbered list item ("5. Single-variable,
+# cut-based ...") to a heading; real numbered headings are short.
+_LIST_ITEM_HEAD_RE = re.compile(r"^\d+\.\s+\S.{55,}$")
+
+
+def _paper_pdf(name: str) -> Path:
+    if not name.endswith(".pdf"):
+        name += ".pdf"
+    _safe_name(name, ".pdf")
+    path = PAPER_DIR / name
+    if not path.exists():
+        avail = sorted(p.name for p in PAPER_DIR.glob("*.pdf"))
+        raise FileNotFoundError(
+            f"no paper '{name}' in data/papers/; available: "
+            f"{', '.join(avail) or '(none — put the PDF in data/papers/)'}")
+    return path
+
+
+def _paper_converted(pdf: Path) -> Path:
+    """Return data/papers/<stem>/, converting the PDF first if needed."""
+    out = PAPER_DIR / pdf.stem
+    md = out / f"{pdf.stem}.md"
+    if not md.exists() or md.stat().st_mtime < pdf.stat().st_mtime:
+        try:
+            import pymupdf
+            from .paperlite import convert
+        except ImportError:
+            raise RuntimeError("read_paper needs PyMuPDF: "
+                               "pip install 'pymupdf>=1.24'") from None
+        pymupdf.TOOLS.mupdf_display_errors(False)
+        convert(str(pdf), PAPER_DIR)
+    return out
+
+
+def _paper_sections(md_text: str) -> list[dict]:
+    """Split the Markdown at every heading. Each chunk gets a class:
+    'priority' (methodology/results), 'skip' (contents, acknowledgements),
+    'back' (references, appendices and everything after them) or 'other'.
+    Subsections with no keyword of their own inherit their parent's class."""
+    sections, cur, page = [], None, 1
+    stack: list[tuple[int, str]] = []          # (level, class) of open parents
+    back = False
+    for line in md_text.splitlines():
+        if m := _PAGE_MARK_RE.match(line):
+            page = int(m.group(1))
+        h = _MD_HEAD_RE.match(line)
+        if h and _LIST_ITEM_HEAD_RE.match(h.group(2).strip()):
+            line, h = h.group(2).strip(), None  # keep it as body text
+        if h and len(h.group(1)) > 1:          # level 1 is the paper title
+            level, title = len(h.group(1)), h.group(2).strip()
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if _PAPER_BACK_RE.search(title):
+                back = True
+            if back:
+                cls = "back"
+            elif _PAPER_SKIP_RE.search(title):
+                cls = "skip"
+            elif _PAPER_PRIORITY_RE.search(title):
+                cls = "priority"
+            else:
+                cls = stack[-1][1] if stack else "other"
+            stack.append((level, cls))
+            cur = {"level": level, "title": title, "class": cls,
+                   "page": page, "lines": [line]}
+            sections.append(cur)
+        elif cur is None:
+            if sections == [] and line.startswith("# "):
+                continue                        # title, shown in the header
+            cur = {"level": 2, "title": "(front matter)", "class": "other",
+                   "page": page, "lines": [line]}
+            sections.append(cur)
+        else:
+            cur["lines"].append(line)
+    for s in sections:
+        s["text"] = "\n".join(s["lines"]).strip()
+    return sections
+
+
+def _paper_header(index: dict, stem: str, sections: list[dict]) -> str:
+    rel = f"data/papers/{stem}"
+    out = [f"# {index.get('title') or stem}",
+           f"source: {rel}.pdf, {index.get('pages', '?')} pages; Markdown "
+           f"{rel}/{stem}.md; crops under {rel}/ (paths below are relative "
+           f"to it)", "", "Sections ([shown] / [ask by name] / "
+           "[back matter] / [skipped]):"]
+    tag = {"priority": "shown", "other": "ask by name",
+           "back": "back matter", "skip": "skipped"}
+    for s in sections:
+        out.append(f"{'  ' * max(s['level'] - 2, 0)}- {s['title']} "
+                   f"(p{s['page']}, {len(s['text']):,} chars) "
+                   f"[{tag[s['class']]}]")
+    for kind in ("figures", "tables"):
+        items = index.get(kind) or []
+        if items:
+            out.append(f"\n{kind.capitalize()}:")
+            for r in items:
+                cap = r.get("caption", "")
+                cap = cap if len(cap) <= 120 else cap[:117] + "..."
+                out.append(f"- {r['label']} (p{r['page']}, "
+                           f"{r.get('file') or 'no crop'}): {cap}")
+    return "\n".join(out)
+
+
+def _page_range(pages: str) -> tuple[int, int]:
+    m = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+))?\s*", pages)
+    if not m:
+        raise ValueError(f"invalid page range {pages!r} (use e.g. '5' or '3-6')")
+    lo = int(m.group(1))
+    return lo, int(m.group(2) or lo)
+
+
+def _clip(text: str, budget: int, hint: str) -> str:
+    if len(text) <= budget:
+        return text
+    return (text[:budget].rsplit("\n", 1)[0]
+            + f"\n\n[... truncated at {budget:,} chars; {hint}]")
+
+
+@beta_tool
+def read_paper(name: str = "", section: str = "", pages: str = "") -> str:
+    """Read a published paper (a PDF the student put in data/papers/) as
+    Markdown. Use it at the PLAN stage to take the variables, selection
+    windows, background treatment and systematics directly from the
+    analysis you follow (read_references has only curated summaries).
+
+    Call with no name to list the available papers. With only a name you
+    get the outline, the figure/table list with crop paths, and the
+    methodology and results sections (abstract, samples, selection,
+    backgrounds, signal extraction, systematics, results, conclusion).
+    Other sections (introduction, theory, detector, discussion) and back
+    matter (references, appendices) are listed but not shown: ask for one
+    with section="<heading text>", or for pages with pages="3-6".
+    Numbered equations appear as image links; their text is in index.json.
+
+    Args:
+        name: PDF file name in data/papers/, with or without .pdf;
+            empty to list the papers.
+        section: case-insensitive part of a heading, e.g. "Appendix A" or
+            "Introduction"; returns that section with its subsections.
+        pages: page or page range, e.g. "7" or "3-6".
+    """
+    import json
+    if not name:
+        pdfs = sorted(PAPER_DIR.glob("*.pdf"))
+        if not pdfs:
+            return ("no papers yet: the student must put the PDFs in "
+                    "data/papers/ (e.g. the arXiv PDF of the analysis you "
+                    "follow); use web_search meanwhile")
+        lines = ["Papers in data/papers/:"]
+        for p in pdfs:
+            ix = PAPER_DIR / p.stem / "index.json"
+            title = (json.loads(ix.read_text()).get("title", "")
+                     if ix.exists() else "(not converted yet)")
+            lines.append(f"- {p.name}: {title}")
+        return "\n".join(lines)
+    try:
+        pdf = _paper_pdf(name)
+        out = _paper_converted(pdf)
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        return f"error: {e}"
+    except Exception as e:                      # a PDF the converter chokes on
+        return f"error: converting {name!r} failed: {type(e).__name__}: {e}"
+    stem = pdf.stem
+    md_text = (out / f"{stem}.md").read_text(encoding="utf-8")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    sections = _paper_sections(md_text)
+
+    if pages:
+        try:
+            lo, hi = _page_range(pages)
+        except ValueError as e:
+            return f"error: {e}"
+        keep, page = [], 1
+        for line in md_text.splitlines():
+            if m := _PAGE_MARK_RE.match(line):
+                page = int(m.group(1))
+            if lo <= page <= hi:
+                keep.append(line)
+        if not keep:
+            return f"error: no pages {pages} (paper has {index.get('pages')})"
+        return _clip(f"# {index.get('title') or stem}, pages {pages}\n\n"
+                     + "\n".join(keep), PAPER_CHAR_BUDGET,
+                     "ask for a narrower page range")
+
+    if section:
+        hits = [i for i, s in enumerate(sections)
+                if section.lower() in s["title"].lower()]
+        if not hits:
+            return (f"error: no heading contains {section!r}; headings: "
+                    + "; ".join(s["title"] for s in sections))
+        i = hits[0]
+        body = [sections[i]["text"]]
+        for s in sections[i + 1:]:              # its subsections
+            if s["level"] <= sections[i]["level"]:
+                break
+            body.append(s["text"])
+        more = ("" if len(hits) == 1 else "\n\n[other headings matching "
+                f"{section!r}: " + "; ".join(sections[j]["title"]
+                                             for j in hits[1:]) + "]")
+        return _clip("\n\n".join(body), PAPER_CHAR_BUDGET,
+                     "ask for a subsection or a page range") + more
+
+    header = _paper_header(index, stem, sections)
+    budget = PAPER_CHAR_BUDGET - len(header)
+    shown, held = [], []
+    for s in sections:
+        if s["class"] != "priority":
+            continue
+        if len(s["text"]) <= budget:
+            shown.append(s["text"])
+            budget -= len(s["text"]) + 2
+        else:
+            held.append(s["title"])
+    out_text = header + "\n\n---\n\n" + "\n\n".join(shown)
+    if held:
+        out_text += ("\n\n[not shown, over the size budget — ask by name: "
+                     + "; ".join(held) + "]")
+    return out_text
+
+
 _NOTE_SECTIONS = [
     ("introduction", "1 Introduction"),
     ("detector", "2 Detector model and samples"),
@@ -1402,8 +1647,8 @@ def apply_systematics(table: str, mode: str, value: float, stat: float,
     return "\n".join(lines)
 
 
-ANALYSIS_TOOLS = [read_references, read_recipe, read_selection,
-                  read_note_template, list_samples, inspect_ntuple,
+ANALYSIS_TOOLS = [read_references, read_paper, read_recipe,
+                  read_selection, read_note_template, list_samples, inspect_ntuple,
                   list_branches, list_decay_modes, generate_mc,
                   generate_continuum, make_ntuple, query_ntuple,
                   plot_variable, plot_stacked, scan_cut, fit_templates,
