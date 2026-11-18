@@ -748,10 +748,12 @@ def read_note_template() -> str:
 # --- reference papers (PDF -> Markdown via agent/paperlite) -----------------
 # One folder for everything: drop <stem>.pdf into data/papers/; the first
 # read converts it into data/papers/<stem>/ (<stem>.md, index.json and the
-# figure/table/equation crops). data/ is gitignored, so papers stay local.
+# figure/table/equation crops), and again whenever the PDF or the converter
+# (agent/paperlite/*.py) is newer than that conversion. data/ is gitignored,
+# so papers stay local.
 
-PAPER_DEFAULT_BUDGET = 16_000       # default read: outline + results, ~4k tok
-PAPER_CHAR_BUDGET = 40_000          # cap for any read_paper result, ~10k tok
+PAPER_DEFAULT_BUDGET = 16_000       # default read: outline + results, ~6k tok
+PAPER_CHAR_BUDGET = 40_000          # cap for any read_paper result, ~16k tok
 
 # Section triage by heading text. Methodology and results are shown first;
 # back matter is listed but never shown unless asked for by name.
@@ -801,15 +803,21 @@ def _paper_pdf(name: str) -> Path:
     return path
 
 
+_PAPERLITE_SRC = Path(__file__).resolve().parent / "paperlite"
+
+
 def _paper_converted(pdf: Path) -> Path:
     """Return data/papers/<stem>/, converting the PDF first if needed: the
     cache is valid only when both the Markdown and index.json exist and are
-    newer than the PDF (a conversion interrupted between the two writes, or
-    a deleted index.json, triggers a fresh conversion)."""
+    newer than the PDF and than the converter's own source (a fix to
+    agent/paperlite reconverts each paper on its next read; a conversion
+    interrupted between the two writes, or a deleted index.json, also
+    triggers a fresh conversion)."""
     out = PAPER_DIR / pdf.stem
     cached = [out / f"{pdf.stem}.md", out / "index.json"]
-    if not all(f.exists() and f.stat().st_mtime >= pdf.stat().st_mtime
-               for f in cached):
+    stamp = max([pdf.stat().st_mtime]
+                + [p.stat().st_mtime for p in _PAPERLITE_SRC.glob("*.py")])
+    if not all(f.exists() and f.stat().st_mtime >= stamp for f in cached):
         try:
             import pymupdf
             from .paperlite import convert
@@ -894,7 +902,8 @@ def _paper_sections(md_text: str) -> list[dict]:
 # and numbered equations about selection/variables. Stored in index.json
 # under "locator" so later runs (and students) get it without re-scanning.
 _NUM = r"(?:[−\-]\s?)?\d+(?:\.\d+)?(?!\.?\d)"
-_UNIT = (r"(?:\s*(?:GeV|MeV|keV|TeV)(?:\s*/\s*c(?:\^\{\d\})?)?(?:\^\{\d\})?"
+# GeV, GeV/c, GeV/c^{2}, GeV^{2}, GeV^{2}/c^{4}
+_UNIT = (r"(?:\s*(?:GeV|MeV|keV|TeV)(?:\^\{\d\})?(?:\s*/\s*c(?:\^\{\d\})?)?"
          r"|\s*(?:rad|mrad|cm|mm|µm|ps|ns|%)|\s?°)?")
 _OPER = r"(?:\|[^|\n]{1,40}\||[∆Δ]?[^\W\d_][^\s,;:()]*(?:\([^)\s]{1,12}\))?)"
 _CMP = r"(?:<|>|≤|≥|⩽|⩾)"
@@ -906,7 +915,7 @@ _CUT_RES = [
 _SEL_CAPTION_RE = re.compile(
     r"\b(selection|requirements?|criteria|cuts?|variables?|cutflow|"
     r"efficienc\w*|windows?|vetoe?s?)\b", re.I)
-LOCATOR_VERSION = 3
+LOCATOR_VERSION = 4
 
 
 def _looks_like_variable(v: str) -> bool:
@@ -1083,7 +1092,7 @@ def read_paper(name: str = "", section: str = "", pages: str = "") -> str:
     analysis you follow (read_references has only curated summaries).
 
     Call with no name to list the available papers. With only a name you
-    get a short first view (~4k tokens): the outline, the figure/table
+    get a short first view (~6k tokens): the outline, the figure/table
     list with crop paths, and the abstract, results and conclusions (a
     letter without section headings is shown as its main text, as far as
     it fits). The method sections (selection, signal, backgrounds, fit,
@@ -1300,8 +1309,9 @@ def view_figure(name: str, figure: str):
     data/papers/ as an image (the crop that read_paper lists). Use it when
     the text is not enough: reading a published distribution or fit,
     checking a table the Markdown rendered badly, or an equation whose
-    text is garbled. Each image costs ~1-2k input tokens and stays in the
-    conversation, so look only at what you need, one at a time.
+    text is garbled. An equation costs ~0.1k input tokens, a figure or
+    table ~0.5-3k, and each stays in the conversation, so look only at
+    what you need, one at a time.
 
     Args:
         name: PDF file name in data/papers/, with or without .pdf.

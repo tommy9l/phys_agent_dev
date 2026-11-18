@@ -4,19 +4,19 @@ The analysis policy asks the agent to follow the variables and selection of a
 published analysis. With `read_paper` and `view_figure` it reads the paper
 itself instead of only the curated summaries in `docs/references.md`. A PDF
 the student puts in `data/papers/` is converted once by `agent/paperlite`
-(PyMuPDF, no API call) into Markdown, an `index.json` and figure, table and
+(PyMuPDF, no API call; again only when the PDF or the converter changes) into Markdown, an `index.json` and figure, table and
 equation crops. The agent then reads that conversion in small pieces.
 
-This page shows what the agent receives, call by call, on six Belle II
+This page shows what the agent receives, call by call, on three Belle II
 papers, and where the approach works and where it does not. Everything here
 can be reproduced without an API call:
 
 ```bash
-scripts/fetch_test_papers.sh                                  # the six PDFs -> data/papers/
+scripts/fetch_test_papers.sh                                  # the three PDFs -> data/papers/
 python scripts/show_agent_view.py                             # size table
 python scripts/show_agent_view.py 2602.09800v2 --next --figure "Eq. (5)" --save
 python tests/test_paper_agent_view.py -v                      # what the agent sees, pinned
-python tests/test_paperlite_benchmarks.py -v                  # converter accuracy checks
+python tests/test_paperlite.py -v                             # converter regression checks
 ```
 
 ## One paper, call by call
@@ -32,7 +32,7 @@ Papers in data/papers/:
 ```
 
 **2. `read_paper("2602.09800v2")`**: the short first view (15k chars,
-~3.8k tokens). It holds the outline, where the selection is stated, the figure
+~6k tokens). It holds the outline, where the selection is stated, the figure
 and table list, and the abstract and conclusion. Excerpt:
 
 ```
@@ -58,7 +58,7 @@ SIMULATED SAMPLES AND CORRECTIONS; IV. VALIDATION USING B^{+} → D̄^{0}π^{+} 
 ```
 
 **3. The suggested `section=` call**: the method sections the plan needs
-(23.7k chars, ~5.9k tokens), with their subsections. Introduction, detector
+(23.7k chars, ~9.5k tokens), with their subsections. Introduction, detector
 description, acknowledgements, references and appendices are never sent
 unless asked for by name.
 
@@ -78,67 +78,62 @@ the efficiency table.
 
 | Paper | Pages | PDF sent to the model as a document | Full paperlite Markdown | First view | Suggested method read |
 |---|---:|---:|---:|---:|---:|
-| 2503.11351 muon ID (Elsevier) | 7 | 22.8k | 9.8k | ~1.3k | ~0.5k |
-| 2511.10980 B → X_sνν̄ (PRL letter) | 12 | 43.7k | 22.8k | ~3.9k | — (letter) |
-| 2608.27814 TOP firmware | 17 | 39.3k | 11.5k | ~1.5k | ~2.4k |
-| 2602.19807 ππΥ(1D) (JHEP) | 24 | 68.4k | 27.4k | ~3.1k | ~5.4k |
-| 2602.09800 B⁺ → µ⁺ν (revtex) | 25 | 84.9k | 38.4k | ~3.8k | ~5.9k |
-| 2505.09705 dark Higgs (PRL letter) | 34 | 112.5k | 33.1k | ~3.8k | — (letter) |
+| 2511.10980 B → X_sνν̄ (PRL letter) | 12 | 43.7k | 22.8k | ~6.2k | — (letter) |
+| 2401.02840 R(D\*), hadronic tag (revtex) | 16 | not counted | ~27.7k | ~3.6k | ~13.7k |
+| 2602.09800 B⁺ → µ⁺ν (revtex) | 25 | 84.9k | 38.4k | ~6.1k | ~9.5k |
 
 Tokens. The PDF and full-Markdown columns are exact counts from the API's
-token counter; the last two are estimated at 4 characters per token. A letter
-has no section headings, so its first view shows the start of the main text
-and the locator gives the pages of the rest (`pages="3-5"`).
+token counter, except for R(D\*), which was added later and is estimated. The
+estimates use 2.5 characters per token: the counts give 2.2–2.7 for this
+Markdown, because math and Unicode symbols cost more tokens than plain
+English. A letter has no section headings, so its first view shows the start
+of the main text and the locator gives the pages of the rest (`pages="3-5"`).
+Four more papers were checked while developing (a JHEP paper, an Elsevier
+paper with an ML method, a 34-page letter with appendices, an instrumentation
+paper; up to 112.5k tokens as a PDF); what they showed is pinned on synthetic
+text in `tests/test_offline.py`, and any of them can be fetched by id, e.g.
+`scripts/fetch_test_papers.sh 2602.19807v2`.
 
-## Converter accuracy: paperlite vs. a model transcribing the PDF
+## Converter regression test
 
-![paperlite vs. Claude Opus 5.5 vs. Sonnet 5.5 turning papers into Markdown](figures/paperlite_benchmark.png)
-
-Three reference papers (43 pages); the models were real API runs. The plot and
-the table come from `benchmarks/compare.py` and the recorded measurements in
-`benchmarks/data/`; `benchmarks/score.py` is the notation-neutral scorer (LaTeX
-and paperlite's plain notation are reduced to one form before comparing):
-
-```bash
-python -m benchmarks.compare                                  # plot from the recorded data
-python -m benchmarks.compare --transcripts <dir>              # re-score Opus/Sonnet transcriptions
-python -m benchmarks.score data/papers/2511.10980v2/2511.10980v2.md 2511.10980v2
-```
-
-The model transcriptions are near-full paper text and are not in the
-repository; without `--transcripts` their recorded accuracy is reused.
-paperlite is always re-scored from `data/papers/`.
-
-| | Text checks (units, vectors, sums, scripts, tables, refs) | Equations and figure-only content | Tokens | Cost | Time |
-|---|---:|---:|---:|---:|---:|
-| paperlite | 26/26 | 1/9 as text, 8/9 as linked images | 65k | $0.27 | 0.2 min |
-| Claude Opus 5.5 | 26/26 | 9/9 | 211k | $2.07 | 8.4 min |
-| Claude Sonnet 5.5 | 25/26 | 9/9 | 199k | $0.91 | 4.8 min |
-
-The 26 text checks are the content checks of
-`tests/test_paperlite_benchmarks.py`, minus the two that test paperlite's own
-image-link syntax.
+`tests/test_paperlite.py` converts the three papers (about 20 s, no API
+call) and checks strings that are easy to get wrong, each compared by eye
+with the PDF page: stacked and nested scripts
+(`2.1 GeV < p_{µ}^{*} < 3.4 GeV`, `|t_{cluster}/σ_{t_{cluster}}| < 2.0`),
+vectors and sums in running text, asymmetric errors, table rows with empty
+cells (`| B^{+} → D̄^{0}π^{+} | | (4.66 ± 0.14) × 10^{−3} |`), numbered
+equations kept as text or linked as a crop, captions and references. It
+also checks the structure (title, figure/table/equation counts, headings)
+and hygiene (no leftover LaTeX, no broken glyphs, every crop inside its
+page). A converter change that breaks one of these fails the test. To add a
+case, check a passage against the PDF and add the exact string to the
+paper's `contains` list.
 
 ## Strengths and faults
 
-Each line is pinned by a test in `tests/test_paper_agent_view.py` or
-`tests/test_paperlite_benchmarks.py`. Faults are `expectedFailure` tests:
-they report "unexpected success" once fixed.
+Each line is pinned by a test in `tests/test_paper_agent_view.py`,
+`tests/test_paperlite.py` or `tests/test_offline.py`. Faults are
+`expectedFailure` tests: they report "unexpected success" once fixed.
 
 | | What | Example | Test |
 |---|---|---|---|
-| ✓ | Physics notation survives as text | `[8.8_{−8.2}^{+8.5}(stat)_{−10.7}^{+12.6}(syst)] × 10^{−5}` | `test_content` (benchmarks) |
+| ✓ | Physics notation survives as text | `[8.8_{−8.2}^{+8.5}(stat)_{−10.7}^{+12.6}(syst)] × 10^{−5}` | `test_snippets` (`test_paperlite.py`) |
+| ✓ | Stacked uncertainties in tables | R(D\*) Table VIII, a cell with no central value: `\| PDF shapes \| _{−8.3%}^{+9.1%} \|` | `test_stacked_errors_in_table` |
 | ✓ | The locator finds the selection with pages | `\|E_{B}^{*} − (√s/2)\| < 0.2 GeV (p3)`, `120 < m_{γγ} < 145 MeV/c^{2} (p3)` | `test_locator_finds_selection` |
 | ✓ | Results first, method on request | B → µν: abstract and conclusion shown, selection named in `Next` | `test_abstract_and_conclusion_first`, `test_next_call_reads_the_method` |
+| ✓ | The analysis this repository follows | R(D\*): a ~3.6k-token first view with the result, the cuts on R₂, ΔE, M_bc, M²_miss (with its GeV²/c⁴ units) and E_ECL located, and `Next` naming the selection, fit and systematics sections | `test_results_first_method_on_request`, `test_locator_finds_selection` (`TestRDstar`) |
 | ✓ | Letters without headings | PRL main text shown; unheaded reference list and supplemental material held back | `test_letter_main_text_is_shown`, `test_supplemental_material_is_back_matter` |
-| ✓ | JHEP title page | the abstract under "The Belle II Collaboration" is shown | `test_title_page_block_holds_the_abstract` |
-| ✓ | ML and instrumentation papers | DNN inputs/training and PID performance offered under `Details` | `test_ml_method_sections_are_offered`, `test_performance_sections_are_offered` |
-| ✓ | Clean crops | Table III of the B → µν paper | `test_view_figure_returns_the_table_crop`, `test_links_and_crops` |
-| ✗ | Numbered display equations are images | Eq. (5) text out of order; the agent needs `view_figure` (1–2k tokens) | `test_known_fault_numbered_equation_as_text` |
-| ✗ | Values that exist only in a figure | the 88.2% efficiency in the legend of the muon-ID Fig. 10 | `test_known_fault_value_only_in_a_figure` |
-| ✗ | The locator is a pattern match | misses `M_bc > 5.27 GeV/c²` at the end of its definition; also lists control-region cuts and misses cuts stated in words or only in tables | `test_known_fault_cut_inside_a_definition` |
+| ✓ | JHEP title page | the abstract under "The Belle II Collaboration" is shown, the contents page skipped | `test_paper_title_page_and_locator_patterns` (offline) |
+| ✓ | ML and instrumentation papers | DNN inputs/training and PID performance offered under `Details` | `test_paper_title_page_and_locator_patterns` (offline) |
+| ✓ | Clean crops | Table III of the B → µν paper; Table VIII (systematics) of R(D\*) | `test_view_figure_returns_the_table_crop`, `test_view_figure_returns_the_systematics_table`, `test_links_and_crops` |
+| ✗ | Numbered display equations are images | Eq. (5) text out of order; the agent needs `view_figure` (~0.1k tokens for an equation crop) | `test_known_fault_numbered_equation_as_text` |
+| ✗ | A heading directly above a full-width figure is lost | "Appendix B: Continuum Correction using Off-Resonance Data" (B → µν, p22); its figure ends up under Appendix A | `test_known_fault_heading_above_figure` |
+| ✗ | A label set over an arrow is split | Table I: B⁺ →(WA) X_uℓ⁺ν comes out as `B^{+W} → ^{A}X_{u}ℓ^{+}ν_{ℓ}` | `test_known_fault_label_over_arrow` |
+| ✗ | A heading that starts with math is lost | R(D\*) p7: "B. B̄ → D\*\*ℓ⁻ν̄ composition"; its text (the D\*\* validation) lands under "A. Efficiency correction" | `test_known_fault_heading_starting_with_math` |
+| ✗ | An author list running onto page 2 | only page 1 is summarized; the last names stay in the first view | `test_known_fault_author_list_continues_on_page_2` |
+| ✗ | The locator is a pattern match | misses `M_bc > 5.27 GeV/c²` at the end of its definition and `E_vis` "greater than 4 GeV" stated in words; also lists control-region cuts and misses cuts only in tables | `test_known_fault_cut_inside_a_definition`, `test_known_fault_cut_stated_in_words` |
 | ✗ | Long letters | only the first ~15k chars of the main text in the first view | `test_letter_main_text_is_shown` |
-| ✗ | Not covered | scanned PDFs (no text layer); two-line formulas in running text can scramble word order (paperlite README) | — |
+| ✗ | Not covered | scanned PDFs (no text layer); values that exist only inside a figure (e.g. a number in a legend; `view_figure` shows them); two-line formulas in running text can scramble word order (paperlite README) | — |
 
 ## What is not measured yet
 

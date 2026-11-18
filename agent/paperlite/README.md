@@ -31,6 +31,7 @@ data/papers/<stem>/images/              fig_<N>_p<page>.png
 data/papers/<stem>/tables/              table_<N>_p<page>.png (the Markdown table is in the .md)
 data/papers/<stem>/equations/           eq_<n>_p<page>.png for numbered equations
 data/papers/<stem>/index.json           title, headings, figures, tables, equations: page, file, crop box, caption/text
+                                        (+ "locator": where the selection is stated, added by read_paper)
 ```
 
 ## Notation
@@ -65,25 +66,24 @@ In this repository, `tests/test_offline.py` (`test_read_paper_*`) converts one o
 in `docs/notes/` through the agent's `read_paper` tool and checks the outline, the section triage
 and the path guards.
 
-The benchmark suite below belongs to the standalone paperlite and is **not in this repository
-yet** (its reference PDFs and `tests/golden/` would have to be added first).
-`tests/test_benchmarks.py` converts three reference papers with different templates:
+`tests/test_paperlite.py` is the converter's regression test. It converts three Belle II papers, which `scripts/fetch_test_papers.sh` downloads into `data/papers/`
+(the test is skipped without them):
 
-- `2511.10980v2`: revtex PRL
-- `2602.19807v2`: JHEP
-- `2503.11351v2`: Elsevier
+- `2401.02840v1`: revtex PRD, the hadronic-tag R(D\*) measurement in `docs/references.md`
+- `2602.09800v2`: revtex PRD
+- `2511.10980v2`: revtex PRL letter
 
 It checks:
 
 - **Structure:** title, figure/table/equation counts, headings, the author summary.
-- **Content:** 28 hand-checked strings that used to break: vectors and sums, stacked scripts, units, asymmetric errors, table rows, references.
+- **Snippets:** hand-checked strings that are easy to break: vectors and sums, stacked and nested scripts, units, asymmetric errors, table rows with empty cells, equations, captions, references.
 - **Hygiene:** no leftover `$`, `\commands`, empty scripts or broken glyphs; every link and crop is valid.
-- **Golden:** the Markdown stays at least 97% similar to `tests/golden/`.
 - **Speed:** each paper converts in under 60 s.
+- **Known faults:** `expectedFailure` tests that report "unexpected success" once fixed.
 
 ```bash
-python3.11 -m unittest -v tests.test_benchmarks                  # ~10 s, prints a score per paper
-UPDATE_GOLDEN=1 python3.11 -m unittest tests.test_benchmarks     # accept today's output as the new golden
+scripts/fetch_test_papers.sh
+python tests/test_paperlite.py -v                                # ~20 s
 ```
 
 ## Known limitations

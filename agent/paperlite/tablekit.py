@@ -306,9 +306,31 @@ class Chunk:
     y: float               # main baseline
     size: float
 
+    def _stacked_without_base(self) -> bool:
+        """
+        A cell holding only a stacked pair of scripts, no base glyph: "+9.1%"
+        set over "−8.3%" around the row's baseline (systematics tables). Every
+        glyph is script-size, and some sit above and some below the baseline.
+        """
+        ink = [(s, c) for s, c in self.chars if c["c"].strip()]
+        if not ink or any(s["size"] >= 0.88 * self.size for s, _ in ink):
+            return False
+        dys = [c["origin"][1] - self.y for _, c in ink]
+        return min(dys) < -0.12 * self.size and max(dys) > 0.08 * self.size
+
     def render(self) -> str:
+        chars = sorted(self.chars, key=lambda sc: sc[1]["bbox"][0])
+        stacked = self._stacked_without_base()
+        if stacked:
+            # Sorting by x alone interleaves the two script lines glyph by glyph
+            # ("98..13%%"): keep each source span whole, spans in order of their
+            # leftmost glyph.
+            first: dict[int, int] = {}
+            for s, _ in chars:
+                first.setdefault(id(s), len(first))
+            chars.sort(key=lambda sc: (first[id(sc[0])], sc[1]["bbox"][0]))
         spans, cur, cur_src = [], None, None
-        for s, c in sorted(self.chars, key=lambda sc: sc[1]["bbox"][0]):
+        for s, c in chars:
             if cur is None or s is not cur_src:
                 cur = {"text": "", "font": s["font"], "size": s["size"], "flags": s["flags"],
                        "origin": c["origin"], "bbox": c["bbox"], "chars": []}
@@ -320,7 +342,16 @@ class Chunk:
             _refresh_geometry(sp)
         line = {"bbox": (self.x0, 0, self.x1, 0), "dir": (1.0, 0.0), "spans": spans}
         try:
-            return render_tokens(line_tokens(line)).strip()
+            toks = line_tokens(line)
+            if stacked:
+                # line_tokens takes the cell's biggest glyph as the base; with no
+                # base glyph, scripts are relative to the row's baseline instead
+                for t in toks:
+                    if t.text.strip():
+                        dy = t.origin_y - self.y
+                        t.role = ("sup" if dy < -0.12 * self.size
+                                  else "sub" if dy > 0.08 * self.size else "base")
+            return render_tokens(toks).strip()
         except Exception:
             return "".join(c["c"] for _, c in self.chars).strip()
 
