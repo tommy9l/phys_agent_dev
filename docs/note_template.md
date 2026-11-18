@@ -3,7 +3,7 @@
 Every analysis note written by the agent follows the section skeleton of a
 Belle II physics paper (modelled on arXiv:2206.05946), extended by the
 sections that only make sense for an agent-produced study. The top-level
-sections are FIXED — same titles, same order, numbered 1–11. A section
+sections are FIXED — same titles, same order, numbered 1–10. A section
 that does not apply to a given study is kept with a one-sentence
 statement of why ("Not applicable: ..."); it is never omitted. Subsections
 inside a section are free.
@@ -38,10 +38,25 @@ Markdown the image's alt text, in LaTeX `\caption` after
 save_note_latex enforce this.
 
 Unlike a journal paper, the note must be self-explanatory for a referee
-who has not seen the tool outputs: every section from 3 to 8 contains at
+who has not seen the tool outputs: every section from 2 to 7 contains at
 least one table or one figure (Markdown image embed with a full
 descriptive caption as the alt text), and every number in the note comes
 from a tool result of the session.
+
+Quality bar (a physicist should be able to referee the note): motivate
+every cut by naming the background it removes, and show the scan or
+distribution that fixed its value; embed every plot you produced at the
+point where it is discussed, with a full descriptive caption as the alt
+text — what is shown, after which selection stage, and what the reader
+should notice, e.g.
+`![The m2miss distribution after the D* windows, ...](plots/<name>.png)`
+(a bare file name is not acceptable); state what is NOT modeled and how a
+real analysis would handle it; cite the published analyses you followed.
+
+Materials header: if any Belle II official MC or data entered the
+analysis, the note carries the header "INTERNAL — Belle II official
+samples used; not for public release" instead of the public-materials
+disclaimer, and must not claim to use only public materials.
 
 ## Abstract (before section 1)
 A self-contained quantitative summary: samples, selection, the result
