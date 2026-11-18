@@ -734,11 +734,15 @@ def read_selection(name: str) -> str:
 
 @beta_tool
 def read_note_template() -> str:
-    """Read the fixed analysis-note template (section skeleton modelled on
-    a Belle II paper, plus the agent-specific provenance section, and the
-    tables/figures each section must contain). Call this before writing
-    the note; save_note rejects notes that deviate from it."""
-    return (REPO / "docs" / "note_template.md").read_text()
+    """Read the analysis-note rules: the fixed section skeleton (modelled on
+    a Belle II paper, plus the agent-specific provenance section) with the
+    tables/figures each section must contain, the writing rules (register,
+    quality bar, captions, materials header), and the typesetting rules for
+    save_note_latex. Call this before writing the note; save_note and
+    save_note_latex reject notes that deviate from it."""
+    docs = REPO / "docs"
+    return ((docs / "note_template.md").read_text() + "\n\n---\n\n"
+            + (docs / "note_typesetting.md").read_text())
 
 
 # --- reference papers (PDF -> Markdown via agent/paperlite) -----------------
@@ -746,7 +750,8 @@ def read_note_template() -> str:
 # read converts it into data/papers/<stem>/ (<stem>.md, index.json and the
 # figure/table/equation crops). data/ is gitignored, so papers stay local.
 
-PAPER_CHAR_BUDGET = 40_000          # ~10k tokens per read_paper result
+PAPER_DEFAULT_BUDGET = 16_000       # default read: outline + results, ~4k tok
+PAPER_CHAR_BUDGET = 40_000          # cap for any read_paper result, ~10k tok
 
 # Section triage by heading text. Methodology and results are shown first;
 # back matter is listed but never shown unless asked for by name.
@@ -755,12 +760,27 @@ _PAPER_SKIP_RE = re.compile(
     re.I)
 _PAPER_BACK_RE = re.compile(
     r"\b(references|bibliography|appendi(x|ces)|supplement\w*)\b", re.I)
-_PAPER_PRIORITY_RE = re.compile(
-    r"\b(abstract|method\w*|analysis|strategy|selection|reconstruct\w*|"
-    r"event|candidates?|signal|backgrounds?|fit\w*|extraction|yields?|"
-    r"cut ?flow|systematic\w*|uncertaint\w*|efficienc\w*|calibrat\w*|corrections?|"
-    r"samples?|simulation|data ?sets?|data|control|continuum|tag\w*|"
-    r"results?|measurements?|conclusions?|summary)\b", re.I)
+# The budget is filled tier by tier: 0 abstract/results/conclusions (and
+# the title-page block, which holds the abstract in JHEP style), 1 the
+# selection, signal, backgrounds, fit and systematics, 2 samples,
+# simulation, method details and ML inputs/training.
+_PAPER_TIER0_RE = re.compile(
+    r"\b(abstract|results?|measurements?|conclusions?|summary|"
+    r"collaboration)\b", re.I)
+_PAPER_TIER1_RE = re.compile(
+    r"\b(selection|reconstruct\w*|candidates?|signal|backgrounds?|"
+    r"fit\w*|extraction|yields?|cut ?flow|systematic\w*|uncertaint\w*|"
+    r"limits?)\b", re.I)
+_PAPER_TIER2_RE = re.compile(
+    r"\b(method\w*|analysis|strategy|procedures?|event|efficienc\w*|"
+    r"calibrat\w*|corrections?|samples?|simulation|data ?sets?|data|control|"
+    r"continuum|tag\w*|validation|inputs?|variables?|training|networks?|"
+    r"performance|algorithms?|architecture|implementation|identification|"
+    r"likelihood)\b", re.I)
+# Letters (PRL style) have no section headings and an unheaded reference
+# list that starts with "[1] Author ...".
+_REF_LIST_START_RE = re.compile(r"^\[1\]\s+\S")
+LETTER_BODY_MIN_CHARS = 4000
 _MD_HEAD_RE = re.compile(r"^(#{1,6}) (.+)$")
 _PAGE_MARK_RE = re.compile(r"^<!-- page (\d+) -->$")
 # paperlite sometimes promotes a long numbered list item ("5. Single-variable,
@@ -782,10 +802,14 @@ def _paper_pdf(name: str) -> Path:
 
 
 def _paper_converted(pdf: Path) -> Path:
-    """Return data/papers/<stem>/, converting the PDF first if needed."""
+    """Return data/papers/<stem>/, converting the PDF first if needed: the
+    cache is valid only when both the Markdown and index.json exist and are
+    newer than the PDF (a conversion interrupted between the two writes, or
+    a deleted index.json, triggers a fresh conversion)."""
     out = PAPER_DIR / pdf.stem
-    md = out / f"{pdf.stem}.md"
-    if not md.exists() or md.stat().st_mtime < pdf.stat().st_mtime:
+    cached = [out / f"{pdf.stem}.md", out / "index.json"]
+    if not all(f.exists() and f.stat().st_mtime >= pdf.stat().st_mtime
+               for f in cached):
         try:
             import pymupdf
             from .paperlite import convert
@@ -799,12 +823,24 @@ def _paper_converted(pdf: Path) -> Path:
 
 def _paper_sections(md_text: str) -> list[dict]:
     """Split the Markdown at every heading. Each chunk gets a class:
-    'priority' (methodology/results), 'skip' (contents, acknowledgements),
-    'back' (references, appendices and everything after them) or 'other'.
-    Subsections with no keyword of their own inherit their parent's class."""
+    'priority' with a tier (0: abstract/results/conclusions, 1: selection,
+    signal, backgrounds, fit, systematics, 2: samples, simulation, method
+    details), 'skip' (contents, acknowledgements), 'back'
+    (references, appendices, supplemental material and everything after
+    them) or 'other'. Subsections with no keyword of their own inherit
+    their parent's class and tier. Text before the first heading is the
+    abstract, or for a letter without headings the whole main text: both
+    are tier 0. An unheaded "[1] ..." reference list starts back matter."""
     sections, cur, page = [], None, 1
-    stack: list[tuple[int, str]] = []          # (level, class) of open parents
+    stack: list[tuple[int, str, int]] = []     # (level, class, tier) parents
     back = False
+
+    def start(level, title, cls, tier, line):
+        nonlocal cur
+        cur = {"level": level, "title": title, "class": cls, "tier": tier,
+               "page": page, "lines": [line]}
+        sections.append(cur)
+
     for line in md_text.splitlines():
         if m := _PAGE_MARK_RE.match(line):
             page = int(m.group(1))
@@ -817,29 +853,184 @@ def _paper_sections(md_text: str) -> list[dict]:
                 stack.pop()
             if _PAPER_BACK_RE.search(title):
                 back = True
+            tier = -1
             if back:
                 cls = "back"
             elif _PAPER_SKIP_RE.search(title):
                 cls = "skip"
-            elif _PAPER_PRIORITY_RE.search(title):
-                cls = "priority"
+            elif _PAPER_TIER0_RE.search(title):
+                cls, tier = "priority", 0
+            elif _PAPER_TIER1_RE.search(title):
+                cls, tier = "priority", 1
+            elif _PAPER_TIER2_RE.search(title):
+                cls, tier = "priority", 2
+            elif stack:
+                cls, tier = stack[-1][1], stack[-1][2]
             else:
-                cls = stack[-1][1] if stack else "other"
-            stack.append((level, cls))
-            cur = {"level": level, "title": title, "class": cls,
-                   "page": page, "lines": [line]}
-            sections.append(cur)
+                cls = "other"
+            stack.append((level, cls, tier))
+            start(level, title, cls, tier, line)
+        elif not back and _REF_LIST_START_RE.match(line):
+            back = True
+            stack = [(2, "back", -1)]
+            start(2, "References (unheaded list)", "back", -1, line)
         elif cur is None:
-            if sections == [] and line.startswith("# "):
+            if line.startswith("# "):
                 continue                        # title, shown in the header
-            cur = {"level": 2, "title": "(front matter)", "class": "other",
-                   "page": page, "lines": [line]}
-            sections.append(cur)
+            start(2, "(front matter)", "priority", 0, line)
         else:
             cur["lines"].append(line)
     for s in sections:
         s["text"] = "\n".join(s["lines"]).strip()
+        if s["title"] == "(front matter)":
+            s["title"] = ("(main text, no section headings)"
+                          if len(s["text"]) >= LETTER_BODY_MIN_CHARS
+                          else "(front matter: abstract)")
     return sections
+
+
+# Locator: where the paper states its selection. A pattern match over the
+# converted text for "variable op value [unit]" and windows, plus tables
+# and numbered equations about selection/variables. Stored in index.json
+# under "locator" so later runs (and students) get it without re-scanning.
+_NUM = r"(?:[−\-]\s?)?\d+(?:\.\d+)?(?!\.?\d)"
+_UNIT = (r"(?:\s*(?:GeV|MeV|keV|TeV)(?:\s*/\s*c(?:\^\{\d\})?)?(?:\^\{\d\})?"
+         r"|\s*(?:rad|mrad|cm|mm|µm|ps|ns|%)|\s?°)?")
+_OPER = r"(?:\|[^|\n]{1,40}\||[∆Δ]?[^\W\d_][^\s,;:()]*(?:\([^)\s]{1,12}\))?)"
+_CMP = r"(?:<|>|≤|≥|⩽|⩾)"
+_CUT_RES = [
+    re.compile(rf"(?<![\w}}])({_NUM}{_UNIT}\s*{_CMP}\s*{_OPER}\s*{_CMP}\s*{_NUM}{_UNIT})"),
+    re.compile(rf"(?<![\w}}|/])({_OPER}\s*{_CMP}\s*{_NUM}{_UNIT})"),
+    re.compile(rf"(?<![\w}}|/])({_OPER}\s*∈\s*\[\s*{_NUM}\s*,\s*{_NUM}\s*\]{_UNIT})"),
+]
+_SEL_CAPTION_RE = re.compile(
+    r"\b(selection|requirements?|criteria|cuts?|variables?|cutflow|"
+    r"efficienc\w*|windows?|vetoe?s?)\b", re.I)
+LOCATOR_VERSION = 3
+
+
+def _looks_like_variable(v: str) -> bool:
+    """R_{2}, M_{bc}, m(Kπ), |∆E|, E_{tag}^{CM}, Mbc yes; "B", "against" no."""
+    if v.count("{") != v.count("}") or v.count("(") != v.count(")"):
+        return False                            # "p⃗}": broken vector markup
+    if re.search(r"[_^(|∆Δ]|[^\x00-\x7f]", v):
+        return True
+    return bool(re.fullmatch(r"(?=.*[A-Z])[A-Za-z]{2,4}\d*", v))
+
+
+def _cut_variable(cut: str) -> str:
+    s = re.sub(rf"^{_NUM}{_UNIT}\s*{_CMP}\s*", "", cut)
+    return re.split(rf"\s*(?:{_CMP}|∈)", s, 1)[0].strip()
+
+
+def _paper_locator(md_text: str, index: dict) -> dict:
+    cuts: dict[str, dict] = {}
+    by_section: dict[str, dict] = {}
+    page, section, back = 1, "(front matter)", False
+    for line in md_text.splitlines():
+        if m := _PAGE_MARK_RE.match(line):
+            page = int(m.group(1))
+            continue
+        h = _MD_HEAD_RE.match(line)
+        if h and not _LIST_ITEM_HEAD_RE.match(h.group(2).strip()):
+            section = ("(text before the first heading)" if len(h.group(1)) == 1
+                       else h.group(2).strip())
+            # skip reference lists only: supplemental material and
+            # appendices after them often list variables and cuts
+            back = bool(re.search(r"\b(references|bibliography)\b",
+                                  section, re.I))
+            continue
+        if _REF_LIST_START_RE.match(line):
+            back = True                         # unheaded reference list
+        if back and not re.match(r"^\[\d+\]\s", line) and len(line) > 300:
+            back = False                        # prose after the list ends it
+        if back or line.startswith(("|", "```", "![")):
+            continue                            # references, tables, images
+        taken: list[tuple[int, int]] = []      # spans of two-sided windows
+        for rx in _CUT_RES:
+            for m in rx.finditer(line):
+                a, b = m.span(1)
+                if any(a < tb and ta < b for ta, tb in taken):
+                    continue                    # one side of a window
+                taken.append((a, b))
+                cut = re.sub(r"\s+", " ", m.group(1)).strip()
+                cut = re.sub(r"^([−\-]) (\d)", r"\1\2", cut)
+                if not _looks_like_variable(_cut_variable(cut)):
+                    continue                    # "38.1 > 0.75", "B > 0.0"
+                c = cuts.setdefault(cut, {"cut": cut, "pages": [],
+                                          "sections": []})
+                if page not in c["pages"]:
+                    c["pages"].append(page)
+                if section not in c["sections"]:
+                    c["sections"].append(section)
+                s = by_section.setdefault(section, {"section": section,
+                                                    "pages": [], "n": 0})
+                s["n"] += 1
+                if page not in s["pages"]:
+                    s["pages"].append(page)
+    variables = []
+    for c in cuts.values():
+        v = _cut_variable(c["cut"])
+        if v not in variables:
+            variables.append(v)
+    tables = [{"label": r["label"], "page": r["page"], "file": r.get("file"),
+               "caption": r.get("caption", "")[:160]}
+              for r in index.get("tables") or []
+              if _SEL_CAPTION_RE.search(r.get("caption", ""))]
+    equations = [{"numbers": r.get("numbers"), "page": r["page"],
+                  "file": r.get("file"), "text": r.get("text", "")[:160]}
+                 for r in index.get("equations") or [] if r.get("numbers")]
+    return {"version": LOCATOR_VERSION,
+            "note": "pattern-matched from the converted text; verify "
+                    "against the paper before using a value",
+            "sections": sorted(by_section.values(), key=lambda s: -s["n"]),
+            "cuts": list(cuts.values()), "variables": variables,
+            "tables": tables, "equations": equations}
+
+
+def _paper_index(out: Path, stem: str) -> dict:
+    """index.json, with the locator added (and saved) if missing/outdated."""
+    import json
+    ix_path = out / "index.json"
+    index = json.loads(ix_path.read_text(encoding="utf-8"))
+    if (index.get("locator") or {}).get("version") != LOCATOR_VERSION:
+        md_text = (out / f"{stem}.md").read_text(encoding="utf-8")
+        index["locator"] = _paper_locator(md_text, index)
+        ix_path.write_text(json.dumps(index, indent=1, ensure_ascii=False),
+                           encoding="utf-8")
+    return index
+
+
+def _locator_text(loc: dict, max_cuts: int = 30) -> str:
+    def pages(ps):
+        ps = sorted(ps)
+        return f"p{ps[0]}" if len(ps) == 1 else f"p{ps[0]}–{ps[-1]}" \
+            if ps == list(range(ps[0], ps[-1] + 1)) else \
+            "p" + ", ".join(map(str, ps))
+    out = ["Where the selection is stated (pattern-matched; verify values "
+           "in the paper):"]
+    if loc["sections"]:
+        out.append("- sections with the most requirements: " + "; ".join(
+            f"{s['section']} ({s['n']} on {pages(s['pages'])})"
+            for s in loc["sections"][:4]))
+    if loc["variables"]:
+        out.append("- variables cut on: " + ", ".join(loc["variables"][:25]))
+    if loc["cuts"]:
+        shown = loc["cuts"][:max_cuts]
+        out.append("- requirements: " + "; ".join(
+            f"{c['cut']} ({pages(c['pages'])})" for c in shown)
+            + (f"; ... {len(loc['cuts']) - max_cuts} more in index.json"
+               if len(loc["cuts"]) > max_cuts else ""))
+    if loc["tables"]:
+        out.append("- selection/variable tables: " + "; ".join(
+            f"{t['label']} (p{t['page']})" for t in loc["tables"]))
+    if loc["equations"]:
+        out.append("- numbered equations (definitions): " + "; ".join(
+            f"({', '.join(e['numbers'])}) p{e['page']}"
+            for e in loc["equations"][:15]))
+    if len(out) == 1:
+        out.append("- no cut-like requirements found in the text")
+    return "\n".join(out)
 
 
 def _paper_header(index: dict, stem: str, sections: list[dict]) -> str:
@@ -847,21 +1038,23 @@ def _paper_header(index: dict, stem: str, sections: list[dict]) -> str:
     out = [f"# {index.get('title') or stem}",
            f"source: {rel}.pdf, {index.get('pages', '?')} pages; Markdown "
            f"{rel}/{stem}.md; crops under {rel}/ (paths below are relative "
-           f"to it)", "", "Sections ([shown] / [ask by name] / "
-           "[back matter] / [skipped]):"]
-    tag = {"priority": "shown", "other": "ask by name",
-           "back": "back matter", "skip": "skipped"}
+           f"to it)", "", "Sections ([shown] / [partly shown] / "
+           "[method, ask by name] / [details, ask by name] / [ask by name] / "
+           "[back matter] / [skipped]); read any of them with "
+           "read_paper(name, section=\"A; B\") or pages=\"3-6\":"]
     for s in sections:
         out.append(f"{'  ' * max(s['level'] - 2, 0)}- {s['title']} "
                    f"(p{s['page']}, {len(s['text']):,} chars) "
-                   f"[{tag[s['class']]}]")
+                   f"[{s['status']}]")
+    if index.get("locator"):
+        out.append("\n" + _locator_text(index["locator"]))
     for kind in ("figures", "tables"):
         items = index.get(kind) or []
         if items:
             out.append(f"\n{kind.capitalize()}:")
             for r in items:
                 cap = r.get("caption", "")
-                cap = cap if len(cap) <= 120 else cap[:117] + "..."
+                cap = cap if len(cap) <= 90 else cap[:87] + "..."
                 out.append(f"- {r['label']} (p{r['page']}, "
                            f"{r.get('file') or 'no crop'}): {cap}")
     return "\n".join(out)
@@ -890,19 +1083,30 @@ def read_paper(name: str = "", section: str = "", pages: str = "") -> str:
     analysis you follow (read_references has only curated summaries).
 
     Call with no name to list the available papers. With only a name you
-    get the outline, the figure/table list with crop paths, and the
-    methodology and results sections (abstract, samples, selection,
-    backgrounds, signal extraction, systematics, results, conclusion).
+    get a short first view (~4k tokens): the outline, the figure/table
+    list with crop paths, and the abstract, results and conclusions (a
+    letter without section headings is shown as its main text, as far as
+    it fits). The method sections (selection, signal, backgrounds, fit,
+    systematics) are tagged [method, ask by name] and named in a ready
+    "Next:" call; read only the ones you need.
+    The outline also says where the selection is stated: the variables
+    cut on, each requirement found in the text with its pages, and the
+    selection/variable tables and numbered equations (pattern-matched, so
+    confirm a value in the paper before using it; the full list is in
+    data/papers/<stem>/index.json under "locator").
     Other sections (introduction, theory, detector, discussion) and back
-    matter (references, appendices) are listed but not shown: ask for one
+    matter (references, appendices, supplemental material) are listed but
+    not shown: ask for one
     with section="<heading text>", or for pages with pages="3-6".
     Numbered equations appear as image links; their text is in index.json.
+    To look at a figure, table or equation crop, use view_figure.
 
     Args:
         name: PDF file name in data/papers/, with or without .pdf;
             empty to list the papers.
-        section: case-insensitive part of a heading, e.g. "Appendix A" or
-            "Introduction"; returns that section with its subsections.
+        section: case-insensitive part of a heading, e.g. "Appendix A";
+            several separated by ";" ("III. EVENT; VI. SYST"). Returns
+            each section with its subsections.
         pages: page or page range, e.g. "7" or "3-6".
     """
     import json
@@ -928,7 +1132,7 @@ def read_paper(name: str = "", section: str = "", pages: str = "") -> str:
         return f"error: converting {name!r} failed: {type(e).__name__}: {e}"
     stem = pdf.stem
     md_text = (out / f"{stem}.md").read_text(encoding="utf-8")
-    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    index = _paper_index(out, stem)
     sections = _paper_sections(md_text)
 
     if pages:
@@ -949,39 +1153,188 @@ def read_paper(name: str = "", section: str = "", pages: str = "") -> str:
                      "ask for a narrower page range")
 
     if section:
-        hits = [i for i, s in enumerate(sections)
-                if section.lower() in s["title"].lower()]
-        if not hits:
-            return (f"error: no heading contains {section!r}; headings: "
+        parts, notes, done = [], [], set()
+        for want in [w.strip() for w in section.split(";") if w.strip()]:
+            hits = [i for i, s in enumerate(sections)
+                    if want.lower() in s["title"].lower()]
+            if not hits:
+                notes.append(f"no heading contains {want!r}")
+                continue
+            i = hits[0]
+            if i in done:
+                continue
+            body = [sections[i]["text"]]
+            done.add(i)
+            for j in range(i + 1, len(sections)):   # its subsections
+                if sections[j]["level"] <= sections[i]["level"]:
+                    break
+                body.append(sections[j]["text"])
+                done.add(j)
+            parts.append("\n\n".join(body))
+            if len(hits) > 1:
+                notes.append(f"other headings matching {want!r}: "
+                             + "; ".join(sections[j]["title"]
+                                         for j in hits[1:]))
+        if not parts:
+            return ("error: " + "; ".join(notes) + ". Headings: "
                     + "; ".join(s["title"] for s in sections))
-        i = hits[0]
-        body = [sections[i]["text"]]
-        for s in sections[i + 1:]:              # its subsections
-            if s["level"] <= sections[i]["level"]:
-                break
-            body.append(s["text"])
-        more = ("" if len(hits) == 1 else "\n\n[other headings matching "
-                f"{section!r}: " + "; ".join(sections[j]["title"]
-                                             for j in hits[1:]) + "]")
-        return _clip("\n\n".join(body), PAPER_CHAR_BUDGET,
-                     "ask for a subsection or a page range") + more
+        return (_clip("\n\n".join(parts), PAPER_CHAR_BUDGET,
+                      "ask for fewer sections or a page range")
+                + "".join(f"\n\n[{n}]" for n in notes))
 
-    header = _paper_header(index, stem, sections)
-    budget = PAPER_CHAR_BUDGET - len(header)
-    shown, held = [], []
-    for s in sections:
-        if s["class"] != "priority":
-            continue
-        if len(s["text"]) <= budget:
-            shown.append(s["text"])
+    base = {"other": "ask by name", "back": "back matter", "skip": "skipped"}
+    later = {1: "method, ask by name", 2: "details, ask by name"}
+    for s in sections:                          # longest tag: upper bound
+        s["status"] = base.get(s["class"]) or later.get(s["tier"],
+                                                         "partly shown")
+    nxt = _next_read_hint(sections)
+    budget = (PAPER_DEFAULT_BUDGET - len(_paper_header(index, stem, sections))
+              - len(nxt) - 8)
+    body: dict[int, str] = {}
+    # within tier 0: abstract first, then summary/conclusion, then the
+    # detailed results (output stays in document order)
+    def rank(s):
+        if re.search(r"abstract|collaboration|front matter|main text",
+                     s["title"], re.I):
+            return 0
+        return 1 if re.search(r"conclusion|summary", s["title"], re.I) else 2
+    todo = sorted((i for i, s in enumerate(sections)
+                   if s["class"] == "priority" and s["tier"] == 0),
+                  key=lambda i: rank(sections[i]))
+    for i in todo:                              # whole sections first
+        s = sections[i]
+        if len(s["text"]) + 2 <= budget:
+            body[i], s["status"] = s["text"], "shown"
             budget -= len(s["text"]) + 2
+    for i in todo:                              # then the start of the rest
+        s = sections[i]
+        if i in body:
+            continue
+        if budget >= 1500:                      # show the start, say where
+            note = (f"\n\n[... section continues: read_paper(name, "
+                    f"section={s['title'][:60]!r}) or pages=...]")
+            head = s["text"][:budget - len(note) - 2]
+            head = head.rsplit("\n\n", 1)[0] if "\n\n" in head else head
+            body[i], s["status"] = head + note, "partly shown"
+            budget -= len(body[i]) + 2
         else:
-            held.append(s["title"])
-    out_text = header + "\n\n---\n\n" + "\n\n".join(shown)
-    if held:
-        out_text += ("\n\n[not shown, over the size budget — ask by name: "
-                     + "; ".join(held) + "]")
-    return out_text
+            s["status"] = "over budget"
+    header = _paper_header(index, stem, sections)
+    return (header + nxt + "\n\n---\n\n"
+            + "\n\n".join(body[i] for i in sorted(body)))
+
+
+def _next_read_hint(sections: list[dict]) -> str:
+    """Ready-made section= calls for the tier-1 and tier-2 sections, naming
+    a parent once instead of each of its subsections."""
+    covered: set[int] = set()                   # read along with a parent
+
+    def keys(tier):
+        out = []
+        for i, s in enumerate(sections):
+            if i in covered or s["class"] != "priority" or s["tier"] != tier:
+                continue
+            out.append(s["title"][:60])
+            for j in range(i + 1, len(sections)):
+                if sections[j]["level"] <= s["level"]:
+                    break
+                covered.add(j)
+        return "; ".join(out[:6])
+    lines = []
+    if k := keys(1):
+        lines.append("Next (selection, signal, backgrounds, fit, "
+                     f"systematics): read_paper(name, section={k!r})")
+    if k := keys(2):
+        lines.append("Details (samples, simulation, method, inputs, "
+                     f"training): read_paper(name, section={k!r})")
+    return "\n\n" + "\n".join(lines) if lines else ""
+
+
+FIGURE_MAX_PX = 1568                # API downsizes anything larger anyway
+_CROP_PATH_RE = re.compile(r"^(images|tables|equations)/[A-Za-z0-9_.-]+\.png$")
+_FIG_REF_RE = re.compile(
+    r"^(?P<kind>fig(?:ure)?|tab(?:le)?|eq(?:uation)?|eqn)\.?\s*"
+    r"\(?\s*(?P<num>[A-Z]?\d+(?:\.\d+)?[a-z]?|[IVX]+)\s*\)?$", re.I)
+
+
+def _find_crop(index: dict, figure: str) -> tuple[str, str, list]:
+    """Map 'Figure 3' / 'Table II' / 'Eq. (7)' / 'images/fig_3_p5.png' to
+    (crop path, caption, other matching labels)."""
+    figure = figure.strip()
+    if _CROP_PATH_RE.match(figure):
+        for kind in ("figures", "tables", "equations"):
+            for r in index.get(kind) or []:
+                if r.get("file") == figure:
+                    return figure, r.get("caption") or r.get("text", ""), []
+        return figure, "", []
+    m = _FIG_REF_RE.match(figure)
+    if not m:
+        raise ValueError(f"cannot parse {figure!r}; use e.g. 'Figure 3', "
+                         "'Table 2', 'Equation 7' or a crop path from "
+                         "read_paper such as 'images/fig_3_p5.png'")
+    kind, num = m.group("kind").lower(), m.group("num")
+    if kind.startswith("eq"):
+        hits = [r for r in index.get("equations") or []
+                if num in (r.get("numbers") or [])]
+        label = f"Equation ({num})"
+        hits = [(r["file"], f"{label}: {r.get('text', '')}") for r in hits]
+    else:
+        key, word = (("figures", "Figure") if kind.startswith("fig")
+                     else ("tables", "Table"))
+        label = f"{word} {num}"
+        hits = [(r.get("file"), r.get("caption", ""))
+                for r in index.get(key) or []
+                if r.get("label", "").lower() == label.lower()]
+    if not hits:
+        raise LookupError(f"no {label} in this paper (see the figure/table "
+                          "list from read_paper)")
+    if hits[0][0] is None:
+        raise LookupError(f"{label} has no crop (the converter could not "
+                          "locate it); read the page with read_paper(pages=)")
+    return hits[0][0], hits[0][1], [h[0] for h in hits[1:] if h[0]]
+
+
+@beta_tool
+def view_figure(name: str, figure: str):
+    """Look at one figure, table or numbered equation of a paper in
+    data/papers/ as an image (the crop that read_paper lists). Use it when
+    the text is not enough: reading a published distribution or fit,
+    checking a table the Markdown rendered badly, or an equation whose
+    text is garbled. Each image costs ~1-2k input tokens and stays in the
+    conversation, so look only at what you need, one at a time.
+
+    Args:
+        name: PDF file name in data/papers/, with or without .pdf.
+        figure: "Figure 3", "Table 2", "Equation 7" (also "Fig. 3",
+            "Table II", "Eq. (7)"), or a crop path from read_paper such
+            as "images/fig_3_p5.png".
+    """
+    import base64
+    try:
+        pdf = _paper_pdf(name)
+        out = _paper_converted(pdf)
+        index = _paper_index(out, pdf.stem)
+        rel, caption, others = _find_crop(index, figure)
+    except (ValueError, FileNotFoundError, LookupError, RuntimeError) as e:
+        return f"error: {e}"
+    path = out / rel
+    if not path.exists():
+        return (f"error: crop {rel} is missing (converted with --no-images?); "
+                f"reconvert: python -m agent.paperlite data/papers/{pdf.name}")
+    import pymupdf
+    pix = pymupdf.Pixmap(str(path))
+    if max(pix.width, pix.height) > FIGURE_MAX_PX:
+        s = FIGURE_MAX_PX / max(pix.width, pix.height)
+        pix = pymupdf.Pixmap(pix, max(1, round(pix.width * s)),
+                             max(1, round(pix.height * s)), None)
+    png = pix.tobytes("png")
+    note = (f"data/papers/{pdf.stem}/{rel} ({pix.width}x{pix.height} px)"
+            + (f"\n{caption}" if caption else "")
+            + (f"\n[also matching: {', '.join(others)}]" if others else ""))
+    return [{"type": "text", "text": note},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/png",
+                "data": base64.b64encode(png).decode("ascii")}}]
 
 
 _NOTE_SECTIONS = [
@@ -1647,9 +2000,9 @@ def apply_systematics(table: str, mode: str, value: float, stat: float,
     return "\n".join(lines)
 
 
-ANALYSIS_TOOLS = [read_references, read_paper, read_recipe,
-                  read_selection, read_note_template, list_samples, inspect_ntuple,
-                  list_branches, list_decay_modes, generate_mc,
+ANALYSIS_TOOLS = [read_references, read_paper, view_figure, read_recipe,
+                  read_selection, read_note_template, list_samples,
+                  inspect_ntuple, list_branches, list_decay_modes, generate_mc,
                   generate_continuum, make_ntuple, query_ntuple,
                   plot_variable, plot_stacked, scan_cut, fit_templates,
                   apply_systematics, read_note, save_note, save_note_latex]
