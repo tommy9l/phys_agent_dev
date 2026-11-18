@@ -40,7 +40,7 @@ the model must call before anything else.
 One-time setup (on top of the conda environment of section 3):
 
 ```bash
-pip install anthropic
+pip install anthropic 'pymupdf>=1.24'   # pymupdf: reads reference-paper PDFs (read_paper)
 export ANTHROPIC_API_KEY=sk-ant-...   # from https://console.anthropic.com (usage-based billing)
 ```
 

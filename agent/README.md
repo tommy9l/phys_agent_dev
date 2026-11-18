@@ -9,7 +9,7 @@ between Plan and Execute.
 
 ```bash
 source scripts/env.sh
-pip install anthropic
+pip install anthropic 'pymupdf>=1.24'   # pymupdf: only for read_paper
 export ANTHROPIC_API_KEY=...   # or `ant auth login`
 ```
 
@@ -39,10 +39,13 @@ The approval gate between Plan and Execute has two modes
 | File | Role |
 |---|---|
 | `runner.py` | agent loop (Anthropic tool runner), system prompt with the Plan→Execute→Report contract and the analysis policy |
-| `tools.py` | typed tools: generation (`list_decay_modes`, `generate_mc`, `generate_continuum`, `make_ntuple`), ntuples (`list_branches`, `query_ntuple`, `plot_variable`, `plot_stacked`, `scan_cut`, `fit_templates`), systematics (`apply_systematics`), notes |
+| `tools.py` | typed tools: references (`read_references`, `read_paper`, `view_figure`, `read_recipe`, `read_selection`), generation (`list_decay_modes`, `generate_mc`, `generate_continuum`, `make_ntuple`), ntuples (`list_branches`, `query_ntuple`, `plot_variable`, `plot_stacked`, `scan_cut`, `fit_templates`), systematics (`apply_systematics`), notes |
 | `__main__.py` | CLI entry point |
+| `paperlite/` | PDF → Markdown converter (PyMuPDF) behind `read_paper`; see `paperlite/README.md` |
 | `../systematics/*.json` | published systematic-uncertainty tables read by `apply_systematics` (e.g. Belle II arXiv:2206.05946 Table I) |
 | `../tests/test_offline.py` | offline tests, no API calls: `python tests/test_offline.py` |
+| `../tests/test_paperlite.py`, `../tests/test_paper_agent_view.py` | optional: converter regression checks (hand-checked hard snippets) and what the agent receives, on three Belle II papers (53 pages, including the R(D\*) analysis in `docs/references.md`) fetched with `scripts/fetch_test_papers.sh` (skipped without them) |
+| `../scripts/show_agent_view.py` | prints what `read_paper` / `view_figure` return for a paper, no API call; examples and strengths/faults in `../docs/paper_reading.md` |
 
 Design choices worth knowing:
 
@@ -53,6 +56,29 @@ Design choices worth knowing:
 - Tool file access is confined to `generation/dec/`, `data/`, `plots/`.
   Ntuples may sit in plain subdirectories of `data/`
   (e.g. `data/kekcc/` for the Belle II full-MC samples copied from KEKCC).
+- Reference papers: the student puts PDFs in `data/papers/` (gitignored).
+  `read_paper` converts one on first use into `data/papers/<stem>/`
+  (Markdown, `index.json`, figure/table/equation crops), and again only when
+  the PDF or the converter in `agent/paperlite/` has changed since. The default read
+  is a short first view (at most 16k characters, about 6k tokens): the outline, the figure/table
+  list, and the abstract, results and conclusions (a PRL-style letter
+  without headings is shown as main text, as far as it fits). It ends with
+  ready-made `section="A; B"` calls for the method sections (selection,
+  signal, backgrounds, fit, systematics) and the details (samples,
+  simulation, inputs, training), so the agent reads only what it needs;
+  `pages="3-6"` reads by page. The outline also says where the selection
+  is stated: the variables cut on, each requirement with its pages, and
+  the selection/variable tables and numbered equations. This is
+  pattern-matched from the text, so values must be checked in the paper,
+  and it is saved in `index.json` under `locator` so later runs reuse it.
+  `view_figure` shows the agent one figure/table/equation crop as an image
+  (downscaled to at most 1568 px: about 0.1k tokens for an equation,
+  typically 0.6k and at most ~3k for a figure or table).
+- Context kept small: the system prompt holds only the workflow and the
+  analysis policy. The note-writing and LaTeX rules
+  (`docs/note_template.md`, `docs/note_typesetting.md`) come back from
+  `read_note_template`, so they enter the context only when a note is
+  written.
 - `query_ntuple` / `plot_variable` evaluate cut strings with numpy in a
   restricted namespace.
 - Both ntuple formats are read: the fast-sim tree `events` and the basf2
@@ -60,7 +86,11 @@ Design choices worth knowing:
   `deltaE`, `B_rank`, `isSignal`; use `list_branches` to see them).
 - Only text crosses the network: the task, the tool definitions and the
   short strings the tools return. Plot tools return a file path, never an
-  image; ntuples never leave the machine.
+  image; ntuples never leave the machine. The one exception is the
+  published papers you put in `data/papers/`: `read_paper` sends their
+  extracted text, and `view_figure` sends a single crop (figure, table or
+  equation) as an image when the agent asks for it. The full PDF is never
+  sent.
 - Cost: the agent loop uses **prompt caching**, so the system prompt, tool
   definitions and history resent each turn are billed as cache reads. The
   end-of-run `[usage]` line counts agent turns *and* reviewer calls,

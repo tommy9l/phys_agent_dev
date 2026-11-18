@@ -209,6 +209,219 @@ def test_caption_placement_checks():
     assert "caption line" in _check_table_captions(bad_md)[0]
 
 
+
+def test_read_paper_triage_and_guards():
+    """read_paper converts a PDF from the papers folder on first use, shows
+    methodology/results, lists but hides intro/discussion/appendix, and
+    rejects paths outside the folder. Uses an analysis note from docs/notes/
+    as the 'paper'; skipped when PyMuPDF is not installed."""
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        print("  (skipped: pymupdf not installed)")
+        return
+    import shutil
+    repo = Path(__file__).resolve().parents[1]
+    src = repo / "docs" / "notes" / "dsttaunu_note_agent.pdf"
+    with tempfile.TemporaryDirectory() as d:
+        old = tools.PAPER_DIR
+        tools.PAPER_DIR = Path(d)
+        try:
+            assert "no papers yet" in _call(tools.read_paper)
+            shutil.copy(src, Path(d) / "note.pdf")
+            assert "note.pdf: (not converted yet)" in _call(tools.read_paper)
+
+            out = _call(tools.read_paper, name="note")
+            assert (Path(d) / "note" / "index.json").exists()
+            assert len(out) <= tools.PAPER_DEFAULT_BUDGET   # short first view
+            assert "3 Event selection (p3" in out and "[shown]" in out
+            assert "1 Introduction" in out and "[ask by name]" in out
+            assert "Appendix: Referee comments" in out
+            assert "[back matter]" in out
+            body = out.split("\n---\n", 1)[1]
+            assert "## 5.1 Cut-and-count" in body         # results shown
+            assert "## 3.1 Preselection" not in body      # method on request
+            assert "## 5.2 Template fit" not in body      # a fit is method
+            assert "[method, ask by name]" in out
+            assert "section='3 Event selection; 4 Background" in out  # Next
+            both = _call(tools.read_paper, name="note",
+                         section="3 Event selection; 4 Background")
+            assert "### 3.1 Preselection" in both          # with subsections
+            assert "## 4 Background estimation" in both
+            assert "## 1 Introduction" not in body        # intro held back
+            assert "Appendix" not in body                 # appendix held back
+            assert "images/fig_1_p3.png" in out           # crop paths listed
+
+            # locator: where the selection is stated, cached in index.json
+            assert "Where the selection is stated" in out
+            assert "R_{2} < 0.4 (p1, 4, 5" in out
+            assert "|∆m − 0.1454| < 0.0025 GeV (p4)" in out
+            import json
+            ix_path = Path(d) / "note" / "index.json"
+            loc = json.loads(ix_path.read_text())["locator"]
+            assert loc["version"] == tools.LOCATOR_VERSION
+            assert "E_{tag}^{CM}" in loc["variables"]
+            assert "B" not in loc["variables"]           # "S/√(S+B) > 0"
+            assert not any(c["cut"].startswith("1 <") for c in loc["cuts"])
+            # a missing index.json triggers a reconversion, not a crash
+            ix_path.unlink()
+            assert _call(tools.read_paper, name="note").startswith("# ")
+            assert ix_path.exists()
+            # a converter newer than the conversion (agent/paperlite changed)
+            # reconverts on the next read; an unchanged one does not
+            import os
+            import time
+            md_path = Path(d) / "note" / "note.md"
+            fake_src = Path(d) / "paperlite_src"
+            fake_src.mkdir()
+            (fake_src / "tablekit.py").write_text("")
+            later = time.time() + 60
+            os.utime(fake_src / "tablekit.py", (later, later))
+            before = md_path.stat().st_mtime_ns
+            real_src, tools._PAPERLITE_SRC = tools._PAPERLITE_SRC, fake_src
+            try:
+                _call(tools.read_paper, name="note")
+            finally:
+                tools._PAPERLITE_SRC = real_src
+            assert md_path.stat().st_mtime_ns > before, "not reconverted"
+            before = md_path.stat().st_mtime_ns
+            _call(tools.read_paper, name="note")
+            assert md_path.stat().st_mtime_ns == before, "reconverted needlessly"
+
+            sec = _call(tools.read_paper, name="note", section="appendix")
+            assert sec.startswith("## Appendix") and "### Verdict" in sec
+            pg = _call(tools.read_paper, name="note.pdf", pages="2-3")
+            assert "<!-- page 2 -->" in pg and "<!-- page 4 -->" not in pg
+
+            for bad in ("../x", "/etc/passwd", "a/b"):
+                assert _call(tools.read_paper, name=bad).startswith("error")
+            assert "available: note.pdf" in _call(tools.read_paper, name="no")
+            assert _call(tools.read_paper, name="note",
+                         pages="x").startswith("error")
+            assert "Headings:" in _call(tools.read_paper, name="note",
+                                        section="no such heading")
+
+            # view_figure: caption + PNG block, by label or crop path
+            res = _call(tools.view_figure, name="note", figure="Fig. 3")
+            assert [b["type"] for b in res] == ["text", "image"]
+            assert "images/fig_3_p5.png" in res[0]["text"]
+            assert "Fox–Wolfram" in res[0]["text"]
+            import base64
+            png = base64.b64decode(res[1]["source"]["data"])
+            assert png[:8] == b"\x89PNG\r\n\x1a\n"
+            res = _call(tools.view_figure, name="note",
+                        figure="tables/table_2_p4.png")
+            assert "Table 2" in res[0]["text"]
+            for bad in ("Figure 99", "Eq. (7)", "../../x.png", "blah"):
+                assert _call(tools.view_figure, name="note",
+                             figure=bad).startswith("error"), bad
+            assert "no crop" in _call(tools.view_figure, name="note",
+                                      figure="Figure 7")
+            # oversized crops are downscaled before sending
+            import pymupdf
+            crop = Path(d) / "note" / "images" / "fig_3_p5.png"
+            big = pymupdf.Pixmap(pymupdf.Pixmap(str(crop)), 3000, 2000, None)
+            big.save(str(crop))
+            res = _call(tools.view_figure, name="note", figure="Figure 3")
+            assert "(1568x1045 px)" in res[0]["text"]
+        finally:
+            tools.PAPER_DIR = old
+
+
+def test_paper_sections_letters_and_tiers():
+    """Section triage on synthetic Markdown (no PDF needed): a PRL-style
+    letter without headings is main text, an unheaded "[1] ..." list starts
+    back matter, results/selection/samples land in tiers 0/1/2, and the
+    locator reads windows with units on both bounds."""
+    body = "We select events with 17° < θ < 150° and |dz| < 2 cm. " * 90
+    letter = ("# A letter\n\n<!-- page 1 -->\n\n" + body + "\n\n"
+              "<!-- page 7 -->\n\n[1] A. Author, Phys. Rev. D 1, 1 (2000).\n\n"
+              "[2] B. Author, JHEP 01, 1 (2001).\n\n"
+              "## I. LIST OF BDT INPUT VARIABLES\n\nThe inputs are ...")
+    secs = tools._paper_sections(letter)
+    assert [(s["title"], s["class"]) for s in secs] == [
+        ("(main text, no section headings)", "priority"),
+        ("References (unheaded list)", "back"),
+        ("I. LIST OF BDT INPUT VARIABLES", "back")]
+    loc = tools._paper_locator(letter, {})
+    cuts = [c["cut"] for c in loc["cuts"]]
+    assert cuts == ["17° < θ < 150°", "|dz| < 2 cm"], cuts
+
+    paper = ("# T\n\nAbstract text.\n\n## I. INTRODUCTION\n\nx\n\n"
+             "## II. SIMULATED SAMPLES\n\nx\n\n## III. EVENT SELECTION\n\n"
+             "x\n\n### A. Tag-side calibration\n\nx\n\n### B. Muon ID\n\nx"
+             "\n\n## IV. RESULTS\n\nx\n\n### A. 2HDM interpretation\n\nx"
+             "\n\n## Acknowledgements\n\nx\n\n## Appendix A: More\n\nx")
+    got = {s["title"]: (s["class"], s["tier"])
+           for s in tools._paper_sections(paper)}
+    assert got == {
+        "(front matter: abstract)": ("priority", 0),
+        "I. INTRODUCTION": ("other", -1),
+        "II. SIMULATED SAMPLES": ("priority", 2),
+        "III. EVENT SELECTION": ("priority", 1),
+        "A. Tag-side calibration": ("priority", 2),
+        "B. Muon ID": ("priority", 1),             # inherits its parent
+        "IV. RESULTS": ("priority", 0),
+        "A. 2HDM interpretation": ("priority", 0),
+        "Acknowledgements": ("skip", -1),
+        "Appendix A: More": ("back", -1)}, got
+
+
+def test_paper_title_page_and_locator_patterns():
+    """Cases from papers outside the three fetched test PDFs, on synthetic
+    Markdown: a JHEP title page whose abstract sits under the collaboration
+    heading, a contents page, ML method and instrumentation 'Performance'
+    sections (offered under Details), an appendix; the ∈ [a, b] and ratio
+    cut forms, one window stated on two pages, units like GeV^{2}/c^{4}; and
+    a paper without any cut."""
+    md = ("# Observation of e+e- → π+π−Υ(1D)\n\n<!-- page 1 -->\n\n"
+          "## The Belle II Collaboration\n\nAbstract: The bottomonium spectrum ...\n\n"
+          "## Contents\n\n1 Introduction 1\n\n3 Event Selection 8\n\n"
+          "## 1 Introduction\n\nx\n\n<!-- page 8 -->\n\n"
+          "## 3 Event Selection and Background Study\n\n"
+          "Photon pairs with M(γγ) ∈ [0.511, 0.576] GeV/c^{2} are kept, and the "
+          "vertex fit must satisfy χ^{2}/N_{DOF} < 25. We require "
+          "0.467 < M(π^{+}π^{−}) < 0.529 GeV/c^{2} and E_{extra} < 1.0 GeV, "
+          "in 1.5 GeV^{2}/c^{4} < M_{miss}^{2} < 6.0 GeV^{2}/c^{4}.\n\n"
+          "## 6. Deep Neural Network\n\nx\n\n### 6.1. Input variables\n\nx\n\n"
+          "## 7. Particle-Identification Performance\n\nx\n\n<!-- page 12 -->\n\n"
+          "## Appendix E: Upper Limits\n\n"
+          "The window 0.467 < M(π^{+}π^{−}) < 0.529 GeV/c^{2} is used again.\n")
+    got = {s["title"]: (s["class"], s["tier"]) for s in tools._paper_sections(md)}
+    assert got["The Belle II Collaboration"] == ("priority", 0), got
+    assert got["Contents"] == ("skip", -1), got
+    assert got["3 Event Selection and Background Study"] == ("priority", 1), got
+    assert got["6. Deep Neural Network"] == ("priority", 2), got     # ML method -> Details
+    assert got["6.1. Input variables"] == ("priority", 2), got
+    assert got["7. Particle-Identification Performance"] == ("priority", 2), got
+    assert got["Appendix E: Upper Limits"] == ("back", -1), got
+    text = tools._locator_text(tools._paper_locator(md, {}))
+    for cut in ("M(γγ) ∈ [0.511, 0.576] GeV/c^{2} (p8)", "χ^{2}/N_{DOF} < 25 (p8)",
+                "0.467 < M(π^{+}π^{−}) < 0.529 GeV/c^{2} (p8, 12)",
+                "E_{extra} < 1.0 GeV (p8)",
+                "1.5 GeV^{2}/c^{4} < M_{miss}^{2} < 6.0 GeV^{2}/c^{4} (p8)"):
+        assert cut in text, (cut, text)
+    none = tools._paper_locator("# T\n\n## 2 Readout\n\nThe firmware sends "
+                                "waveforms to the PCs.\n", {})
+    assert "no cut-like requirements found" in tools._locator_text(none)
+
+
+def test_note_rules_come_from_the_template_tool():
+    """The note/LaTeX rules live in docs/ and reach the agent through
+    read_note_template, not the always-loaded system prompt."""
+    text = _call(tools.read_note_template)
+    for needle in ("Quality bar", "INTERNAL — Belle II official samples",
+                   "Typesetting rules", "\\resizebox", "numbered 1–10",
+                   "every section from 2 to 7"):
+        assert needle in text, needle
+    assert "booktabs" not in runner.SYSTEM_PROMPT
+    assert "read_note_template" in runner.SYSTEM_PROMPT
+    assert len(runner.SYSTEM_PROMPT) < 5000
+    # The per-cut evidence is made while running, not when writing the note.
+    execute = runner.SYSTEM_PROMPT.split("2. EXECUTE")[1].split("3. REPORT")[0]
+    for needle in ("every cut", "scan_cut", "plot_stacked", "cut_lines"):
+        assert needle in execute, needle
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
