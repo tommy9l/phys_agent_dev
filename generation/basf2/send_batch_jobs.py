@@ -8,9 +8,14 @@ MODES = [
 #    "B0_Dststlnu",
 #    "B0_Dsttaunu",
     #"B0_JpsiKst",
+    "B0_psi2SKst",
 #    "B0_Kstll",
-    "charged",
-    "mixed"
+    #"charged",
+    #"mixed",
+    "uubar",
+    "ddbar", 
+    "ssbar", 
+    "ccbar"
 ]
 
 for mode in MODES:

@@ -17,6 +17,7 @@ import reconstruction as re
 import mdst as mdst
 import glob as glob
 import sys
+from itertools import product
 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -25,12 +26,14 @@ Steering file for Belle II MC production (generation -> simulation ->
 reconstruction -> mDST), based on the official MC production setup.
 Still MC16ri-like.
 
-Usage:
-    basf2 generic_template.py <mode> [-n N_EVENTS] [--home PATH] [--no-bkg]
+Usage (options for this script must come after "--", otherwise basf2
+rejects them as its own: "error: unrecognised option"):
+    basf2 generic_template.py -- <mode> [--n-events N] [--home PATH] [--no-bkg] [--suffix SUFFIX]
 
 Examples:
-    basf2 generic_template.py B0_Dsttaunu
-    basf2 generic_template.py generic_mixed -n 10000
+    basf2 generic_template.py -- B0_Dsttaunu
+    basf2 generic_template.py -- mixed --n-events 10000 --suffix _1
+    basf2 generic_template.py -- uubar --suffix _1
 """
 
 import argparse
@@ -59,19 +62,42 @@ SIG_MODES = [
     "B0_Dststlnu",
     "B0_Dsttaunu",
     "B0_JpsiKst",
+    "B0_psi2SKst",
     "B0_Kstll",
     "B_Kstll",
     "B_JpsiKst",
+    "B_psi2SKst",
     "generic_bbbar",
     "tau_native"
 ]
 # generic modes
 GEN_MODES = [
     "mixed",
-    "charged"
+    "charged",
 ]
 
-DEC_MODES = SIG_MODES + GEN_MODES
+# continuum, default
+CON_MODES = [
+    "uubar",
+    "ddbar",
+    "ssbar",
+    "ccbar",
+    ]
+# some custom options I want to try for continuum
+# by default, charged conjuagates included
+# InclusiveParticleChecker needs particle NAMES: PDG-code strings such as "11"
+# stop basf2 at initialization ("Unknown particle name: 11").
+# Note: an event is kept if ANY ONE of the listed particles is present.
+CON_SUFFIX = {
+    "wKstr": ["K*+", "K*0", "e-", "mu-"], #K*s, electrons, and muons
+    "wKs": ["K+", "K0", "e-", "mu-"], #kaons, electrons, and muons
+    "wDstr": ["D*+", "D*0", "D_s*+", "D_s+", "e-", "nu_e", "mu-", "nu_mu"], # try to capture any semileptonic decay candidates
+    "wDs": ["D+", "D0","D_s+", "e-", "nu_e", "mu-", "nu_mu"], # try to capture any semileptonic decay candidates,
+}
+#including any possible combination
+CON_CUSTOM = [f"{mode}_{suffix}" for (mode,suffix) in product(CON_MODES, list(CON_SUFFIX.keys()))]
+
+DEC_MODES = SIG_MODES + GEN_MODES + CON_MODES + CON_CUSTOM
 
 
 DEFAULT_N_EVENTS = 5000
@@ -152,6 +178,16 @@ def build_path(mode, n_events, dec_file, out_file, bkg_files):
     elif mode in GEN_MODES:
         # Generic B Bbar: 'mixed' (neutral) or 'charged'
         ge.add_evtgen_generator(main, finalstate=mode)
+    elif mode in CON_MODES:
+        ge.add_continuum_generator(main, finalstate = mode)
+    elif mode in CON_CUSTOM:
+        # expected structure is mode_suffix
+        finalstate, suffix = mode.split("_", 1)
+        # sanity check
+        if (finalstate not in CON_MODES) or (suffix not in CON_SUFFIX):
+            sys.exit(f"for inclusive continuum generator, check {mode}. Something is wrong.")
+        ge.add_inclusive_continuum_generator(main, finalstate = finalstate, particles = CON_SUFFIX[suffix])
+
     else:
         # 
         b2.B2WARNING("unknown mode... fall back is no constraint")
@@ -181,7 +217,9 @@ def main():
     # Fail early if a signal mode is missing its decay file
     if args.mode not in DEC_MODES:
         sys.exit("{args.mode} not registered. Fix or add.")
-    if not dec_file.is_file():
+    # continuum modes use basf2's built-in KKMC/Pythia setup, no user dec file
+    needs_dec = args.mode not in CON_MODES + CON_CUSTOM
+    if needs_dec and not dec_file.is_file():
         sys.exit(f"Decay file not found: {dec_file}")
 
     # Make sure the output directory exists
